@@ -16,6 +16,9 @@ authRouter.options('*', cors(corsOptions));
 
 
 authRouter.get('/test', authController.checkConn);
-authRouter.post('/oauth', authController.socialSignIn)
+authRouter.post('/oauth', authController.socialSignIn);
+authRouter.post('/refresh', authController.refreshToken);
+authRouter.post('/signup', authController.signUp);
+authRouter.post('/login', authController.login);
 
 module.exports = authRouter;

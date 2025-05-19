@@ -16,6 +16,5 @@ userRouter.options('*', cors(corsOptions));
 
 userRouter.post('/login', userController.login);
 userRouter.post('/logout', userController.logout);
-userRouter.post('/signup', userController.signup);
 
 module.exports = userRouter;
