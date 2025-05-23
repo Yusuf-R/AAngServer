@@ -17,6 +17,24 @@ const baseOptions = {
     timestamps: true,
 };
 
+// Authentication methods schema
+const AuthMethodSchema = new Schema({
+    type: {
+        type: String,
+        enum: ['Google', 'Apple', 'Credentials'],
+        required: true
+    },
+    providerId: String,  // googleId, appleId, etc.
+    verified: {
+        type: Boolean,
+        default: false
+    },
+    lastUsed: {
+        type: Date,
+        default: Date.now
+    }
+}, { _id: false });
+
 const AAngSchema = new Schema({
     email: {
         type: String,
@@ -26,9 +44,11 @@ const AAngSchema = new Schema({
     },
     password: {
         type: String,
-        required: function () {
-            return !this.googleId && !this.iosId;
-        },
+        required: function() {
+            // Password is required only if Credentials auth method exists
+            return this.authMethods &&
+                this.authMethods.some(method => method.type === 'Credentials');
+        }
     },
     fullName: String,
     avatar: String,
@@ -43,20 +63,73 @@ const AAngSchema = new Schema({
     phoneNumber: String,
     dob: String,
     gender: { type: String, enum: ["Male", "Female"] },
+
+    // New auth structure
+    authMethods: {
+        type: [AuthMethodSchema],
+        validate: {
+            validator: function(methods) {
+                return methods && methods.length > 0;
+            },
+            message: 'At least one authentication method is required'
+        }
+    },
+
+    // Preferred auth method
+    preferredAuthMethod: {
+        type: String,
+        enum: ['Google', 'Apple', 'Credentials'],
+        default: 'Credentials'
+    },
+
+    // For backward compatibility
     provider: {
         type: String,
-        enum : ['Google', 'Apple', 'Credentials'],
-        default: 'Credentials', // Assume default is form-based
+        enum: ['Google', 'Apple', 'Credentials'],
+        default: 'Credentials'
     },
-    googleId: String,
-    iosId: String,
+
+    // Session handling
     sessionTokens: [{
         token: String,
+        device: String,
+        ip: String,
         createdAt: { type: Date, default: Date.now },
+        lastActive: { type: Date, default: Date.now }
     }],
+
+    // Password reset
+    resetPasswordToken: String,
+    resetPasswordExpiry: Date,
+
+    // Email verification
+    emailVerificationToken: String,
+    emailVerificationExpiry: Date,
+    emailVerified: {
+        type: Boolean,
+        default: false
+    }
 }, baseOptions);
 
-// Address Schema for users
+// Virtual property to check if user has password
+AAngSchema.virtual('hasPassword').get(function() {
+    return !!this.password;
+});
+
+// Pre-save middleware to update legacy fields
+AAngSchema.pre('save', function(next) {
+    // Update provider field based on preferred auth method
+    if (this.preferredAuthMethod) {
+        this.provider = this.preferredAuthMethod;
+    } else if (this.authMethods && this.authMethods.length > 0) {
+        // Set preferred auth method to first method if not set
+        this.preferredAuthMethod = this.authMethods[0].type;
+        this.provider = this.authMethods[0].type;
+    }
+    next();
+});
+
+// Address Schema for users (unchanged)
 const AddressSchema = new Schema({
     category: {
         type: String,
@@ -72,13 +145,13 @@ const AddressSchema = new Schema({
     description: String,
 }, { _id: true });
 
-// User-specific schema
+// User-specific schema (unchanged)
 const ClientSchema = new Schema({
     addresses: { type: [AddressSchema], default: [] },
     rideHistory: { type: Array, default: [] },
 });
 
-// Driver-specific schema
+// Driver-specific schema (unchanged)
 const DriverSchema = new Schema({
     licenseNumber: String,
     vehicleType: String,
@@ -90,7 +163,7 @@ const DriverSchema = new Schema({
     },
 });
 
-// Admin schema (optional)
+// Admin schema (unchanged)
 const AdminSchema = new Schema({
     permissions: {
         type: [String],

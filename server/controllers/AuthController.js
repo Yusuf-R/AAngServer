@@ -3,192 +3,539 @@ import ms from 'ms';
 import jwt from "jsonwebtoken";
 import getModels from "../models/AAng/AAngLogistics";
 import RefreshToken from "../models/RefreshToken";
+import bcrypt from 'bcrypt';
+import {OAuth2Client} from 'google-auth-library';
+import redisClient from '../utils/redis';
+import crypto from 'crypto';
+import nodemailer from 'nodemailer';
+import {UAParser} from 'ua-parser-js';
+import MailClient from '../utils/mailer';
 
-const bcrypt = require('bcrypt');
-const {OAuth2Client} = require('google-auth-library');
-
-const redisClient = require('../utils/redis');
+// Environment variables
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 const accessSecret = process.env.JWT_ACCESS_SECRET;
 const refreshSecret = process.env.JWT_REFRESH_SECRET;
 const accessExpires = process.env.JWT_ACCESS_EXPIRES_IN;
 const refreshExpires = process.env.JWT_REFRESH_EXPIRES_IN;
 const accessExpiresMs = ms(accessExpires);
-console.log({
-    accessExpires,
-})
 
+// Email configuration for password reset and verification
+const transporter = nodemailer.createTransport({
+    service: 'Gmail',
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+    },
+});
 
 class AuthController {
-
+    /**
+     * Check database and Redis connections
+     */
     static async checkConn(req, res) {
-        const dbStatus = await dbClient.isAlive();
-        const redisStatus = await redisClient.isAlive();
-        if (!dbStatus) {
-            return res.status(500).json({error: 'Database connection failed'});
-        }
-        if (!redisStatus) {
-            return res.status(500).json({error: 'Redis connection failed'});
-        }
-        return res.status(200).json({
-            message: 'Server is up and running',
-            redisStatus,
-            dbStatus,
-        });
-    }
+        try {
+            const dbStatus = await dbClient.isAlive();
+            const redisStatus = await redisClient.isAlive();
 
-    static async generateJWT(user, options = {}) {
-        const payload = {
-            id: user.id,
-            role: user.role,
-        };
-
-        // Access Token (short-lived)
-        const accessToken = jwt.sign(payload, accessSecret, {
-            expiresIn: accessExpires,
-            algorithm: 'HS256',
-        });
-
-        // Refresh Token (long-lived)
-        const refreshPayload = { id: user.id };
-
-        const refreshToken = jwt.sign(refreshPayload, refreshSecret, {
-            expiresIn: refreshExpires,
-            algorithm: 'HS256',
-        });
-
-        await RefreshToken.findOneAndUpdate(
-            { userId: user.id },
-            {
-                token: refreshToken,
-                userAgent: options.userAgent || null,
-                ip: options.ip || null,
-            },
-            { upsert: true, new: true }
-        );
-        const { AAngBase } = await getModels();
-
-        await AAngBase.updateOne(
-            { _id: user.id },
-            {
-
-                $push: {
-                    sessionTokens: {
-                        token: accessToken,
-                        createdAt: new Date(),
-                    },
-                },
+            if (!dbStatus) {
+                return res.status(500).json({error: 'Database connection failed'});
             }
-        );
+            if (!redisStatus) {
+                return res.status(500).json({error: 'Redis connection failed'});
+            }
 
-        return { accessToken, refreshToken };
+            return res.status(200).json({
+                message: 'Server is up and running',
+                redisStatus,
+                dbStatus,
+            });
+        } catch (error) {
+            console.error('Connection check error:', error);
+            return res.status(500).json({error: 'Failed to check connections'});
+        }
     }
 
+    /**
+     * Extract device information from user agent
+     */
+    static getDeviceInfo(userAgent) {
+        if (!userAgent) return 'Unknown device';
+
+        const parser = new UAParser(userAgent);
+        const result = parser.getResult();
+
+        return {
+            browser: `${result.browser.name || 'Unknown'} ${result.browser.version || ''}`,
+            os: `${result.os.name || 'Unknown'} ${result.os.version || ''}`,
+            device: result.device.vendor
+                ? `${result.device.vendor} ${result.device.model}`
+                : 'Desktop/Laptop',
+            deviceType: result.device.type || 'desktop'
+        };
+    }
+
+    /**
+     * Generate JWT tokens and store them
+     */
+    static async generateJWT(user, options = {}) {
+        try {
+            const payload = {
+                id: user.id || user._id.toString(),
+                role: user.role,
+                email: user.email
+            };
+
+            const accessToken = jwt.sign(payload, accessSecret, {
+                expiresIn: accessExpires,
+                algorithm: 'HS256',
+            });
+
+            const refreshPayload = {
+                id: user.id || user._id.toString(),
+                authMethod: options.authMethod || user.preferredAuthMethod
+            };
+
+            const refreshToken = jwt.sign(refreshPayload, refreshSecret, {
+                expiresIn: refreshExpires,
+                algorithm: 'HS256',
+            });
+
+            // Get device info
+            const deviceInfo = AuthController.getDeviceInfo(options.userAgent);
+            const deviceString = `${deviceInfo.browser} on ${deviceInfo.os} (${deviceInfo.device})`;
+
+            // Store refresh token in database
+            await RefreshToken.findOneAndUpdate(
+                {userId: user.id || user._id.toString()},
+                {
+                    token: refreshToken,
+                    userAgent: options.userAgent || null,
+                    ip: options.ip || null,
+                    device: deviceString,
+                    authMethod: options.authMethod || user.preferredAuthMethod
+                },
+                {upsert: true, new: true}
+            );
+
+            // Add session token to user
+            const {AAngBase} = await getModels();
+            await AAngBase.updateOne(
+                {_id: user.id || user._id.toString()},
+                {
+                    $push: {
+                        sessionTokens: {
+                            token: accessToken,
+                            device: deviceString,
+                            ip: options.ip || null,
+                            createdAt: new Date(),
+                            lastActive: new Date()
+                        },
+                    },
+                }
+            );
+
+            return {accessToken, refreshToken};
+        } catch (error) {
+            console.error('JWT generation error:', error);
+            throw new Error('Failed to generate authentication tokens');
+        }
+    }
+
+    /**
+     * Social sign-in/sign-up with Google
+     */
     static async socialSignIn(req, res) {
-        const { tokenResponse, provider, role } = req.body;
+        const {tokenResponse, provider, role} = req.body;
+        console.log({req});
 
         if (!tokenResponse || !provider || !role) {
-            return res.status(401).json({ error: 'Invalid request : Missing requirements' });
+            return res.status(400).json({error: 'Invalid request: Missing requirements'});
         }
-        const { idToken } = tokenResponse;
-        // capitalize the first letter of the role --- client --> Client, driver --> Driver
+
+        // Only support Google for now (can be extended to Apple later)
+        if (provider !== 'Google') {
+            return res.status(400).json({error: 'Unsupported provider'});
+        }
+
+        const {idToken} = tokenResponse;
         const roleCapitalized = role.charAt(0).toUpperCase() + role.slice(1);
 
         try {
-            await dbClient.connect(); // Ensure DB connection
+            await dbClient.connect();
 
+            // Verify Google token
             const userInfo = await AuthController.verifyGoogleIdToken(idToken);
+            const {email, name, picture, googleId} = userInfo;
 
-            const { email, name, picture, googleId } = userInfo;
+            const {AAngBase} = await getModels();
+            let user = await AAngBase.findOne({email});
 
-            const { AAngBase } = await getModels();
+            if (user) {
+                // Check if this Google account is already linked
+                const hasGoogleAuth = user.authMethods?.some(
+                    method => method.type === 'Google' && method.providerId === googleId
+                );
 
-            // Check if user already exists
-            let user = await AAngBase.findOne({ email });
-            if (!user) {
+                if (hasGoogleAuth) {
+                    // User already has this Google account linked - normal login
+
+                    // Update last used timestamp for this auth method
+                    const authMethodIndex = user.authMethods.findIndex(
+                        m => m.type === 'Google' && m.providerId === googleId
+                    );
+
+                    if (authMethodIndex !== -1) {
+                        user.authMethods[authMethodIndex].lastUsed = new Date();
+                        user.preferredAuthMethod = 'Google';
+                        await user.save();
+                    }
+                } else {
+                    // User exists but doesn't have this Google account linked
+
+                    // Check if this Google ID is linked to another account
+                    const conflictUser = await AAngBase.findOne({
+                        'authMethods': {
+                            $elemMatch: {
+                                type: 'Google',
+                                providerId: googleId
+                            }
+                        }
+                    });
+
+                    if (conflictUser) {
+                        return res.status(409).json({
+                            error: 'This Google account is already linked to another user',
+                            suggestion: 'Please use another Google account or login with your credentials'
+                        });
+                    }
+
+                    // Return account exists response - user should login with credentials first
+                    return res.status(409).json({
+                        error: 'An account with this email already exists',
+                        accountExists: true,
+                        availableAuthMethods: user.authMethods.map(am => am.type),
+                        action: 'login_and_link'
+                    });
+                }
+            } else {
+                // New user - create account with Google auth
                 user = await AAngBase.create({
                     email,
                     fullName: name,
                     avatar: picture,
-                    googleId,
-                    provider,
-                    role: roleCapitalized
+                    authMethods: [{
+                        type: 'Google',
+                        providerId: googleId,
+                        verified: true,
+                        lastUsed: new Date()
+                    }],
+                    preferredAuthMethod: 'Google',
+                    provider: 'Google', // for backward compatibility
+                    role: roleCapitalized,
+                    emailVerified: true // Google emails are verified
                 });
             }
 
-            const payload = { id: user._id, role: user.role };
-
-            // generate jwt
-            const { accessToken, refreshToken } = await AuthController.generateJWT(payload);
-            console.log('New User Created Successfully');
+            // Generate tokens for the user
+            const {accessToken, refreshToken} = await AuthController.generateJWT(user, {
+                userAgent: req.headers['user-agent'],
+                ip: req.ip,
+                authMethod: 'Google'
+            });
 
             return res.status(201).json({
                 accessToken,
                 refreshToken,
                 user: {
+                    id: user._id,
                     email: user.email,
                     name: user.fullName,
                     avatar: user.avatar,
                     role: user.role.toLowerCase(),
+                    authMethods: user.authMethods.map(am => am.type),
+                    preferredAuthMethod: user.preferredAuthMethod
                 },
                 expiresIn: accessExpiresMs
             });
 
         } catch (err) {
-            console.error(err);
-            return res.status(401).json({ error: 'Invalid Google token' });
+            console.error('Social sign-in error:', err);
+            return res.status(401).json({error: 'Invalid Google token or authentication failed'});
         }
     }
 
+    /**
+     * Verify Google ID token
+     */
     static async verifyGoogleIdToken(idToken) {
-        const ticket = await client.verifyIdToken({
-            idToken,
-            audience: process.env.GOOGLE_CLIENT_ID,
-        });
+        try {
+            const ticket = await client.verifyIdToken({
+                idToken,
+                audience: process.env.GOOGLE_CLIENT_ID,
+            });
 
-        const payload = ticket.getPayload(); // Contains user info
-        return {
-            email: payload.email,
-            name: payload.name,
-            picture: payload.picture,
-            googleId: payload.sub,
-        };
+            const payload = ticket.getPayload();
+
+            return {
+                email: payload.email,
+                name: payload.name,
+                picture: payload.picture,
+                googleId: payload.sub,
+            };
+        } catch (error) {
+            console.error('Google token verification failed:', error);
+            throw new Error('Invalid Google token');
+        }
     }
 
+    /**
+     * Link a social provider to an existing account
+     */
+    static async linkProvider(req, res) {
+        const {tokenResponse, provider} = req.body;
+        const userId = req.user.id;
+
+        if (!tokenResponse || !provider) {
+            return res.status(400).json({error: 'Missing required fields'});
+        }
+
+        // Only support Google for now
+        if (provider !== 'Google') {
+            return res.status(400).json({error: 'Unsupported provider'});
+        }
+
+        try {
+            const {idToken} = tokenResponse;
+            const userInfo = await AuthController.verifyGoogleIdToken(idToken);
+            const {email, googleId} = userInfo;
+
+            // Get user from database
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userId);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            // Check if emails match
+            if (user.email.toLowerCase() !== email.toLowerCase()) {
+                return res.status(400).json({
+                    error: 'The email associated with this Google account does not match your current account email'
+                });
+            }
+
+            // Check if this Google account is already linked to another user
+            const existingUser = await AAngBase.findOne({
+                'authMethods': {
+                    $elemMatch: {
+                        type: 'Google',
+                        providerId: googleId
+                    }
+                }
+            });
+
+            if (existingUser && existingUser._id.toString() !== userId) {
+                return res.status(409).json({
+                    error: 'This Google account is already linked to another user'
+                });
+            }
+
+            // Check if user already has this provider linked
+            const hasProvider = user.authMethods?.some(
+                method => method.type === 'Google' && method.providerId === googleId
+            );
+
+            if (hasProvider) {
+                return res.status(400).json({error: 'This Google account is already linked to your account'});
+            }
+
+            // Add the new auth method
+            if (!user.authMethods) {
+                user.authMethods = [];
+            }
+
+            user.authMethods.push({
+                type: 'Google',
+                providerId: googleId,
+                verified: true,
+                lastUsed: new Date()
+            });
+
+            await user.save();
+
+            return res.status(200).json({
+                message: 'Google account linked successfully',
+                authMethods: user.authMethods.map(am => am.type)
+            });
+
+        } catch (err) {
+            console.error('Provider linking error:', err);
+            return res.status(500).json({error: 'Failed to link provider'});
+        }
+    }
+
+    /**
+     * Unlink a social provider from account
+     */
+    static async unlinkProvider(req, res) {
+        const {provider} = req.body;
+        const userId = req.user.id;
+
+        if (!provider) {
+            return res.status(400).json({error: 'Provider is required'});
+        }
+
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userId);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            // Check if user has this provider
+            const hasProvider = user.authMethods?.some(method => method.type === provider);
+
+            if (!hasProvider) {
+                return res.status(400).json({error: `No ${provider} account linked`});
+            }
+
+            // Prevent removal of last authentication method
+            if (user.authMethods.length === 1) {
+                return res.status(400).json({
+                    error: 'Cannot remove the only authentication method. Add another method before removing this one.'
+                });
+            }
+
+            // Remove the provider
+            user.authMethods = user.authMethods.filter(method => method.type !== provider);
+
+            // Update preferred auth method if needed
+            if (user.preferredAuthMethod === provider) {
+                user.preferredAuthMethod = user.authMethods[0].type;
+            }
+
+            await user.save();
+
+            return res.status(200).json({
+                message: `${provider} account unlinked successfully`,
+                authMethods: user.authMethods.map(am => am.type),
+                preferredAuthMethod: user.preferredAuthMethod
+            });
+
+        } catch (err) {
+            console.error('Provider unlinking error:', err);
+            return res.status(500).json({error: 'Failed to unlink provider'});
+        }
+    }
+
+    /**
+     * Set preferred authentication method
+     */
+    static async setPreferredAuthMethod(req, res) {
+        const {method} = req.body;
+        const userId = req.user.id;
+
+        if (!method) {
+            return res.status(400).json({error: 'Authentication method is required'});
+        }
+
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userId);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            // Check if user has this auth method
+            const hasMethod = user.authMethods?.some(m => m.type === method);
+
+            if (!hasMethod) {
+                return res.status(400).json({
+                    error: `You don't have a ${method} authentication method linked to your account`
+                });
+            }
+
+            // Update preferred method
+            user.preferredAuthMethod = method;
+            await user.save();
+
+            return res.status(200).json({
+                message: `${method} set as preferred authentication method`,
+                preferredAuthMethod: method
+            });
+
+        } catch (err) {
+            console.error('Set preferred auth method error:', err);
+            return res.status(500).json({error: 'Failed to update preferred authentication method'});
+        }
+    }
+
+    /**
+     * Refresh token handler
+     */
     static async refreshToken(req, res) {
-        console.log('[RefreshToken] Request received');
         try {
             const authHeader = req.headers.authorization;
-            const { refreshToken } = req.body;
+            const {refreshToken} = req.body;
 
-            // 1. Validate inputs
+            if (!refreshToken) {
+                return res.status(400).json({error: 'Refresh token required in body'});
+            }
+
+            // Extract and verify tokens
             const oldAccessToken = AuthController.extractAccessToken(authHeader);
-            if (!refreshToken) return res.status(400).json({ error: 'Refresh token required in body' });
 
-            // 2. Decode tokens
-            const decodedAccess = AuthController.verifyAccessToken(oldAccessToken);
+            let decodedAccess;
+            try {
+                decodedAccess = AuthController.verifyAccessToken(oldAccessToken);
+            } catch (error) {
+                // Continue with refresh token if access token is invalid/expired
+            }
+
             const decodedRefresh = AuthController.verifyRefreshToken(refreshToken);
 
-            // 3. Match user IDs
-            if (decodedAccess.id !== decodedRefresh.id) {
-                return res.status(401).json({ error: 'Token mismatch' });
+            if (!decodedRefresh || !decodedRefresh.id) {
+                return res.status(401).json({error: 'Invalid refresh token'});
             }
 
-            // 4. Validate refresh token from DB
-            const stored = await AuthController.validateRefreshTokenInDB(decodedAccess.id, refreshToken);
+            // Validate token in database
+            const stored = await AuthController.validateRefreshTokenInDB(decodedRefresh.id, refreshToken);
             if (!stored) {
-                return res.status(403).json({ error: 'Refresh token not found or revoked' });
+                return res.status(403).json({error: 'Refresh token not found or revoked'});
             }
 
-            // 5. Rotate tokens
-            const { accessToken, newRefreshToken } = AuthController.rotateTokens(decodedAccess);
+            // Get user information
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(decodedRefresh.id);
 
-            // 6. Replace in DB
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            // Generate new tokens
+            const authMethod = decodedRefresh.authMethod || user.preferredAuthMethod;
+            const {accessToken, newRefreshToken} = await AuthController.rotateTokens(user, authMethod);
+
+            // Update refresh token in database
             stored.token = newRefreshToken;
+            stored.lastUsed = new Date();
             await stored.save();
 
-            // 7. Send new tokens
-            console.log('[RefreshToken] Tokens rotated successfully');
+            // Update last active for session
+            if (decodedAccess && decodedAccess.id) {
+                await AAngBase.updateOne(
+                    {
+                        _id: decodedAccess.id,
+                        'sessionTokens.token': oldAccessToken
+                    },
+                    {
+                        $set: {'sessionTokens.$.lastActive': new Date()}
+                    }
+                );
+            }
+
             return res.status(200).json({
                 accessToken,
                 refreshToken: newRefreshToken,
@@ -197,10 +544,13 @@ class AuthController {
 
         } catch (err) {
             console.error('[RefreshToken Error]', err.message);
-            return res.status(401).json({ error: 'Invalid or expired tokens' });
+            return res.status(401).json({error: 'Invalid or expired tokens'});
         }
     }
 
+    /**
+     * Extract access token from Authorization header
+     */
     static extractAccessToken(authHeader) {
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
             throw new Error('Missing or malformed Authorization header');
@@ -208,14 +558,20 @@ class AuthController {
         return authHeader.split(' ')[1];
     }
 
+    /**
+     * Verify access token
+     */
     static verifyAccessToken(token) {
         try {
-            return jwt.verify(token, accessSecret, { ignoreExpiration: true });
+            return jwt.verify(token, accessSecret, {ignoreExpiration: true});
         } catch (err) {
             throw new Error('Invalid access token');
         }
     }
 
+    /**
+     * Verify refresh token
+     */
     static verifyRefreshToken(token) {
         try {
             return jwt.verify(token, refreshSecret);
@@ -224,152 +580,636 @@ class AuthController {
         }
     }
 
+    /**
+     * Validate refresh token in database
+     */
     static async validateRefreshTokenInDB(userId, token) {
-        const stored = await RefreshToken.findOne({ userId, token });
+        const stored = await RefreshToken.findOne({userId, token});
         if (!stored) return null;
-
-        if (stored.isExpired && stored.isExpired()) {
-            await RefreshToken.deleteOne({ _id: stored._id });
+        if (stored.isExpired()) {
+            await stored.remove();
             return null;
         }
-
         return stored;
     }
 
-    static rotateTokens(userPayload) {
+    /**
+     * Generate new tokens
+     */
+    static async rotateTokens(user, authMethod) {
         const accessToken = jwt.sign(
-            { id: userPayload.id, role: userPayload.role },
+            {id: user._id, role: user.role, email: user.email},
             accessSecret,
-            { expiresIn: accessExpires, algorithm: 'HS256' }
+            {expiresIn: accessExpires, algorithm: 'HS256'}
         );
 
         const newRefreshToken = jwt.sign(
-            { id: userPayload.id },
+            {id: user._id, authMethod},
             refreshSecret,
-            { expiresIn: refreshExpires, algorithm: 'HS256' }
+            {expiresIn: refreshExpires, algorithm: 'HS256'}
         );
 
-        return { accessToken, newRefreshToken };
+        return {accessToken, newRefreshToken};
     }
 
+    /**
+     * User registration with credentials
+     */
     static async signUp(req, res) {
-        const { email, password, role } = req.body;
+        const {email, password, role} = req.body;
 
         if (!email || !password || !role) {
-            return res.status(400).json({ error: 'Missing required fields' });
-        }
-
-        try {
-            await dbClient.connect(); // Ensure DB connection
-
-            const { AAngBase } = await getModels();
-
-            // Check if user already exists
-            let user = await AAngBase.findOne({ email });
-            if (user) {
-                return res.status(409).json({ error: 'User already exists' });
-            }
-            const roleCapitalized = role.charAt(0).toUpperCase() + role.slice(1);
-
-            // Hash the password before saving the user
-            const hashedPassword = await AuthController.hashPassword(password);
-
-
-            user = await AAngBase.create({
-                email,
-                password: hashedPassword,
-                role: roleCapitalized,
-            });
-
-            const payload = { id: user._id, role: user.role };
-
-            // generate jwt
-            const { accessToken, refreshToken } = await AuthController.generateJWT(payload);
-
-            return res.status(201).json({
-                accessToken,
-                refreshToken,
-                user: {
-                    email: user.email,
-                    role: user.role.toLowerCase(),
-                },
-                expiresIn: accessExpiresMs
-            });
-
-        } catch (err) {
-            console.error(err);
-            return res.status(500).json({ error: 'Internal server error' });
-        }
-    }
-
-    static async login(req, res) {
-        const { email, password, role } = req.body;
-
-        if (!email || !password || !role) {
-            return res.status(400).json({ error: 'Missing required fields' });
+            return res.status(400).json({error: 'Missing required fields'});
         }
 
         try {
             await dbClient.connect();
-
-            const { AAngBase } = await getModels();
+            const {AAngBase} = await getModels();
 
             // Check if user already exists
-            let user = await AAngBase.findOne({ email });
-            if (!user) {
-                return res.status(404).json({ error: 'User not found' });
+            let user = await AAngBase.findOne({email});
+            if (user) {
+                // Get available auth methods
+                const authMethods = user.authMethods?.map(am => am.type) || [];
+
+                return res.status(409).json({
+                    error: 'User already exists',
+                    accountExists: true,
+                    availableAuthMethods: authMethods
+                });
             }
 
-            // Check if the role matches
-            if (user.role.toLowerCase() !== role.toLowerCase()) {
-                return res.status(403).json({ error: 'Unauthorized role access' });
-            }
+            // Hash password
+            const hashedPassword = await AuthController.hashPassword(password);
+            const roleCapitalized = role.charAt(0).toUpperCase() + role.slice(1);
 
-            // Check if the password is correct
-            const isPasswordValid = await AuthController.comparePassword(password, user.password);
-            if (!isPasswordValid) {
-                return res.status(401).json({ error: 'Invalid credentials' });
-            }
+            // Generate email verification token [length 6, alphaNumeric]
+            const verificationToken = AuthController.generateVerificationToken();
+            // Set token expiry to 15 mins
+            const verificationTokenExpiry = Date.now() + 900000; // 15 minutes
 
-            const payload = { id: user._id, role: user.role };
+            // Create user
+            user = await AAngBase.create({
+                email,
+                password: hashedPassword,
+                role: roleCapitalized,
+                authMethods: [{
+                    type: 'Credentials',
+                    verified: false,
+                    lastUsed: new Date()
+                }],
+                preferredAuthMethod: 'Credentials',
+                provider: 'Credentials', // Backward compatibility
+                emailVerificationToken: verificationToken,
+                emailVerificationExpiry: verificationTokenExpiry
+            });
 
-            // generate jwt
-            const { accessToken, refreshToken } = await AuthController.generateJWT(payload);
+            await MailClient.sendEmailToken(email, verificationToken);
+
+            // Generate tokens
+            const {accessToken, refreshToken} = await AuthController.generateJWT(user, {
+                userAgent: req.headers['user-agent'],
+                ip: req.ip,
+                authMethod: 'Credentials'
+            });
 
             return res.status(201).json({
                 accessToken,
                 refreshToken,
                 user: {
+                    id: user._id,
                     email: user.email,
+                    name: user.fullName,
                     role: user.role.toLowerCase(),
+                    authMethods: ['Credentials'],
+                    preferredAuthMethod: 'Credentials',
+                    emailVerified: false
+                },
+                expiresIn: accessExpiresMs,
+                message: 'Verification email sent. Please check your inbox.'
+            });
+
+        } catch (err) {
+            console.error('Sign up error:', err);
+            return res.status(500).json({error: 'Registration failed'});
+        }
+    }
+
+    /**
+     * User login with credentials
+     */
+    static async logIn(req, res) {
+        const {email, password, role} = req.body;
+
+        if (!email || !password || !role) {
+            return res.status(400).json({error: 'Email and password are required'});
+        }
+
+        try {
+            await dbClient.connect();
+            const {AAngBase} = await getModels();
+
+            // Find user
+            const user = await AAngBase.findOne({email});
+
+            if (!user) {
+                return res.status(401).json({error: 'Invalid email or password'});
+            }
+
+            // Check if role matches
+            if (user.role.toLowerCase() !== role.toLowerCase()) {
+                return res.status(401).json({error: 'Invalid email or password'});
+            }
+
+            // Check if user has password auth method
+            const hasPasswordAuth = user.authMethods?.some(method => method.type === 'Credentials');
+
+            if (!hasPasswordAuth) {
+                // User exists but doesn't have password auth
+                const availableAuthMethods = user.authMethods?.map(am => am.type) || [];
+
+                return res.status(401).json({
+                    error: 'This account does not use password authentication',
+                    accountExists: true,
+                    availableAuthMethods
+                });
+            }
+
+            // Check password
+            const isValidPassword = await AuthController.comparePasswords(password, user.password);
+
+            if (!isValidPassword) {
+                return res.status(401).json({error: 'Invalid email or password'});
+            }
+
+            // Update last used timestamp for credentials auth method
+            const credentialsIndex = user.authMethods.findIndex(m => m.type === 'Credentials');
+            if (credentialsIndex !== -1) {
+                user.authMethods[credentialsIndex].lastUsed = new Date();
+                user.preferredAuthMethod = 'Credentials';
+                await user.save();
+            }
+
+            // Generate tokens
+            const {accessToken, refreshToken} = await AuthController.generateJWT(user, {
+                userAgent: req.headers['user-agent'],
+                ip: req.ip,
+                authMethod: 'Credentials'
+            });
+
+            return res.status(200).json({
+                accessToken,
+                refreshToken,
+                user: {
+                    id: user._id,
+                    email: user.email,
+                    name: user.fullName,
+                    avatar: user.avatar,
+                    role: user.role.toLowerCase(),
+                    authMethods: user.authMethods.map(am => am.type),
+                    preferredAuthMethod: user.preferredAuthMethod,
+                    emailVerified: user.emailVerified || false
                 },
                 expiresIn: accessExpiresMs
             });
+
         } catch (err) {
-            console.error(err);
-            return res.status(500).json({ error: 'Internal server error' });
+            console.error('Sign in error:', err);
+            return res.status(500).json({error: 'Login failed'});
         }
     }
 
+    /**
+     * Log out user and invalidate tokens
+     */
+    static async signOut(req, res) {
+        try {
+            const userId = req.user.id;
+            const authHeader = req.headers.authorization;
+
+            if (!authHeader || !authHeader.startsWith('Bearer ')) {
+                return res.status(400).json({error: 'Missing Authorization header'});
+            }
+
+            const token = authHeader.split(' ')[1];
+
+            // Remove refresh token from database
+            await RefreshToken.findOneAndDelete({userId});
+
+            // Remove access token from user's sessions
+            const {AAngBase} = await getModels();
+            await AAngBase.updateOne(
+                {_id: userId},
+                {$pull: {sessionTokens: {token}}}
+            );
+
+            return res.status(200).json({message: 'Logged out successfully'});
+        } catch (err) {
+            console.error('Logout error:', err);
+            return res.status(500).json({error: 'Logout failed'});
+        }
+    }
+
+    /**
+     * Verify email with token
+     */
+    static async verifyEmail(req, res) {
+        const {token} = req.body;
+
+        if (!token) {
+            return res.status(400).json({error: 'Verification token is required'});
+        }
+
+        try {
+            const {AAngBase} = await getModels();
+
+            const user = await AAngBase.findOne({
+                emailVerificationToken: token,
+                emailVerificationExpiry: {$gt: Date.now()}
+            });
+
+            if (!user) {
+                return res.status(400).json({error: 'Invalid or expired verification token'});
+            }
+
+            // Mark email as verified
+            user.emailVerified = true;
+            user.emailVerificationToken = undefined;
+            user.emailVerificationExpiry = undefined;
+
+            // Update credentials auth method as verified
+            const credentialsIndex = user.authMethods.findIndex(m => m.type === 'Credentials');
+            if (credentialsIndex !== -1) {
+                user.authMethods[credentialsIndex].verified = true;
+            }
+
+            await user.save();
+
+            return res.status(200).json({message: 'Email verified successfully'});
+        } catch (err) {
+            console.error('Email verification error:', err);
+            return res.status(500).json({error: 'Email verification failed'});
+        }
+    }
+
+    /**
+     * Resend verification email
+     */
+    static async resendVerificationEmail(req, res) {
+        const userId = req.user.id;
+
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userId);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            if (user.emailVerified) {
+                return res.status(400).json({error: 'Email is already verified'});
+            }
+
+            // Generate new verification token
+            const verificationToken = AuthController.generateVerificationToken();
+            // Set token expiry to 15 mins
+            const verificationTokenExpiry = Date.now() + 900000; // 15 minutes
+
+            user.emailVerificationToken = verificationToken;
+            user.emailVerificationExpiry = verificationTokenExpiry;
+            await user.save();
+
+            // Send verification email token
+            await MailClient.sendEmailToken(user.email, verificationToken);
+
+            return res.status(200).json({message: 'Verification email sent successfully'});
+        } catch (err) {
+            console.error('Resend verification email error:', err);
+            return res.status(500).json({error: 'Failed to resend verification email'});
+        }
+    }
+
+    /** Generated random OTP code of alphanumeric characters of length 6 **/
+    static generateVerificationToken({length = 6, numericOnly = false} = {}) {
+        const alphaNumChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        const numericChars = '0123456789';
+        const chars = numericOnly ? numericChars : alphaNumChars;
+
+        let token = '';
+        for (let i = 0; i < length; i++) {
+            token += chars[Math.floor(Math.random() * chars.length)];
+        }
+        return token;
+    }
+
+
+    /**
+     * Request password reset
+     */
+    static async forgotPassword(req, res) {
+        const {email} = req.body;
+
+        if (!email) {
+            return res.status(400).json({error: 'Email is required'});
+        }
+
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findOne({email});
+
+            // Don't reveal whether a user with this email exists
+            if (!user) {
+                return res.status(200).json({message: 'If an account with this email exists, a password reset link has been sent'});
+            }
+
+            // Check if user has credentials auth method
+            const hasCredentials = user.authMethods?.some(method => method.type === 'Credentials');
+
+            if (!hasCredentials) {
+                return res.status(200).json({message: 'If an account with this email exists, a password reset link has been sent'});
+            }
+
+            // Generate reset token
+            const resetToken = crypto.randomBytes(32).toString('hex');
+            const resetTokenExpiry = Date.now() + 3600000; // 1 hour
+
+            user.passwordResetToken = resetToken;
+            user.passwordResetExpiry = resetTokenExpiry;
+            await user.save();
+
+            // Send password reset email
+            const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
+            await transporter.sendMail({
+                to: email,
+                subject: 'Password Reset Request',
+                html: `
+                    <h1>Password Reset</h1>
+                    <p>You requested a password reset. Click the link below to set a new password:</p>
+                    <p><a href="${resetLink}">Reset Password</a></p>
+                    <p>This link will expire in 1 hour.</p>
+                    <p>If you didn't request this, please ignore this email.</p>
+                `
+            });
+
+            return res.status(200).json({message: 'If an account with this email exists, a password reset link has been sent'});
+        } catch (err) {
+            console.error('Forgot password error:', err);
+            return res.status(500).json({error: 'Failed to process password reset request'});
+        }
+    }
+
+    /**
+     * Reset password with token
+     */
+    static async resetPassword(req, res) {
+        const {token, newPassword} = req.body;
+
+        if (!token || !newPassword) {
+            return res.status(400).json({error: 'Token and new password are required'});
+        }
+
+        try {
+            const {AAngBase} = await getModels();
+
+            const user = await AAngBase.findOne({
+                passwordResetToken: token,
+                passwordResetExpiry: {$gt: Date.now()}
+            });
+
+            if (!user) {
+                return res.status(400).json({error: 'Invalid or expired reset token'});
+            }
+
+            // Hash new password
+            const hashedPassword = await AuthController.hashPassword(newPassword);
+
+            // Update user
+            user.password = hashedPassword;
+            user.passwordResetToken = undefined;
+            user.passwordResetExpiry = undefined;
+
+            // Update password change timestamp in auth methods
+            const credentialsIndex = user.authMethods.findIndex(m => m.type === 'Credentials');
+            if (credentialsIndex !== -1) {
+                user.authMethods[credentialsIndex].lastUpdated = new Date();
+            }
+
+            await user.save();
+
+            // Invalidate all refresh tokens
+            await RefreshToken.deleteMany({userId: user._id});
+
+            // Remove all session tokens
+            await AAngBase.updateOne(
+                {_id: user._id},
+                {$set: {sessionTokens: []}}
+            );
+
+            return res.status(200).json({message: 'Password reset successfully'});
+        } catch (err) {
+            console.error('Reset password error:', err);
+            return res.status(500).json({error: 'Failed to reset password'});
+        }
+    }
+
+    /**
+     * Change password (authenticated user)
+     */
+    static async changePassword(req, res) {
+        const {currentPassword, newPassword} = req.body;
+        const userId = req.user.id;
+
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({error: 'Current password and new password are required'});
+        }
+
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userId);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            // Check if user has password auth
+            const hasPasswordAuth = user.authMethods?.some(method => method.type === 'Credentials');
+
+            if (!hasPasswordAuth) {
+                return res.status(400).json({error: 'This account does not use password authentication'});
+            }
+
+            // Verify current password
+            const isValidPassword = await AuthController.comparePasswords(currentPassword, user.password);
+
+            if (!isValidPassword) {
+                return res.status(401).json({error: 'Current password is incorrect'});
+            }
+
+            // Update password
+            const hashedPassword = await AuthController.hashPassword(newPassword);
+            user.password = hashedPassword;
+
+            // Update password change timestamp in auth methods
+            const credentialsIndex = user.authMethods.findIndex(m => m.type === 'Credentials');
+            if (credentialsIndex !== -1) {
+                user.authMethods[credentialsIndex].lastUpdated = new Date();
+            }
+
+            await user.save();
+
+            // Keep current session but invalidate all other sessions
+            const authHeader = req.headers.authorization;
+            const currentToken = authHeader.split(' ')[1];
+
+            // Invalidate all refresh tokens except current one
+            await RefreshToken.deleteMany({
+                userId: user._id,
+                token: {$ne: req.body.refreshToken} // Keep current refresh token if provided
+            });
+
+            // Remove all session tokens except current one
+            await AAngBase.updateOne(
+                {_id: user._id},
+                {$pull: {sessionTokens: {token: {$ne: currentToken}}}}
+            );
+
+            return res.status(200).json({message: 'Password changed successfully'});
+        } catch (err) {
+            console.error('Change password error:', err);
+            return res.status(500).json({error: 'Failed to change password'});
+        }
+    }
+
+    /**
+     * Get all active sessions for a user
+     */
+    static async getSessions(req, res) {
+        const userId = req.user.id;
+
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userId);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            // Get current session token
+            const authHeader = req.headers.authorization;
+            const currentToken = authHeader.split(' ')[1];
+
+            // Format sessions
+            const sessions = user.sessionTokens.map(session => ({
+                id: session._id,
+                device: session.device,
+                ip: session.ip,
+                createdAt: session.createdAt,
+                lastActive: session.lastActive,
+                current: session.token === currentToken
+            }));
+
+            return res.status(200).json({sessions});
+        } catch (err) {
+            console.error('Get sessions error:', err);
+            return res.status(500).json({error: 'Failed to retrieve sessions'});
+        }
+    }
+
+    /**
+     * Revoke a specific session
+     */
+    static async revokeSession(req, res) {
+        const userId = req.user.id;
+        const {sessionId} = req.params;
+
+        if (!sessionId) {
+            return res.status(400).json({error: 'Session ID is required'});
+        }
+
+        try {
+            const {AAngBase} = await getModels();
+
+            // Get current session token
+            const authHeader = req.headers.authorization;
+            const currentToken = authHeader.split(' ')[1];
+
+            // Find user and session
+            const user = await AAngBase.findById(userId);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            const session = user.sessionTokens.id(sessionId);
+
+            if (!session) {
+                return res.status(404).json({error: 'Session not found'});
+            }
+
+            // Check if trying to revoke current session
+            if (session.token === currentToken) {
+                return res.status(400).json({error: 'Cannot revoke current session'});
+            }
+
+            // Remove session
+            await AAngBase.updateOne(
+                {_id: userId},
+                {$pull: {sessionTokens: {_id: sessionId}}}
+            );
+
+            return res.status(200).json({message: 'Session revoked successfully'});
+        } catch (err) {
+            console.error('Revoke session error:', err);
+            return res.status(500).json({error: 'Failed to revoke session'});
+        }
+    }
+
+    /**
+     * Revoke all sessions except current one
+     */
+    static async revokeAllSessions(req, res) {
+        const userId = req.user.id;
+
+        try {
+            // Get current session token
+            const authHeader = req.headers.authorization;
+            const currentToken = authHeader.split(' ')[1];
+
+            const {AAngBase} = await getModels();
+
+            // Keep only current session
+            await AAngBase.updateOne(
+                {_id: userId},
+                {$pull: {sessionTokens: {token: {$ne: currentToken}}}}
+            );
+
+            // Invalidate all refresh tokens except current one
+            await RefreshToken.deleteMany({
+                userId,
+                token: {$ne: req.body.refreshToken} // Keep current refresh token if provided
+            });
+
+            return res.status(200).json({message: 'All other sessions revoked successfully'});
+        } catch (err) {
+            console.error('Revoke all sessions error:', err);
+            return res.status(500).json({error: 'Failed to revoke sessions'});
+        }
+    }
+
+    /**
+     * Hash password
+     */
     static async hashPassword(password) {
-        try {
-            const salt = await bcrypt.genSalt(10);
-            return await bcrypt.hash(password, salt);
-        } catch (error) {
-            console.error("Error hashing password:", error.message);
-            throw new Error("Password hashing failed");
-        }
+        const saltRounds = 10;
+        return bcrypt.hash(password, saltRounds);
     }
 
-    static async comparePassword(plainPassword, hashedPassword) {
-        try {
-            return await bcrypt.compare(plainPassword, hashedPassword);
-        } catch (error) {
-            console.error("Error comparing passwords:", error.message);
-            throw new Error("Password comparison failed");
-        }
+    /**
+     * Compare password with hash
+     */
+    static async comparePasswords(password, hash) {
+        return bcrypt.compare(password, hash);
     }
-
 }
 
-module.exports = AuthController;
+export default AuthController;
