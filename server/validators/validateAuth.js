@@ -1,24 +1,42 @@
-import { z } from "zod";
+import * as Yup from 'yup';
 
-// Sign-Up Validator
-export const signUpValidator = z.object({
-    fullName: z.string(),
-    email: z.string().email(),
-    password: z.string()
-        .min(6, "Password must be at least 6 characters")
-        .regex(/[A-Z]/, "Password must contain at least one uppercase letter")
-        .regex(/[a-z]/, "Password must contain at least one lowercase letter")
-        .regex(/\d/, "Password must contain at least one number")
-        .regex(/[\W_]/, "Password must contain at least one special character"),
-    confirmPassword: z.string(),
-}).refine((data) => data.password === data.confirmPassword, {
-    message: "Passwords do not match",
-    path: ["confirmPassword"],
+export const resetPasswordSchema = Yup.object().shape({
+    token: Yup.string().required('Token is required'),
+    newPassword: Yup.string()
+        .required('Password is required')
+        .min(8, 'Password must be at least 8 characters')
+        .matches(/[A-Z]/, 'Must contain at least one uppercase letter')
+        .matches(/[a-z]/, 'Must contain at least one lowercase letter')
+        .matches(/[0-9]/, 'Must contain at least one number')
+        .matches(/[!@#$%^&*(),.?":{}|<>]/, 'Must contain at least one special character'),
 });
 
-// Login Validator
-export const loginValidator = z.object({
-    email: z.string().email(),
-    password: z.string().min(6, "Password must be at least 6 characters"),
+export const signUpSchema = Yup.object().shape({
+    email: Yup.string().email().required(),
+    password: Yup.string()
+        .required()
+        .min(8)
+        .matches(/[A-Z]/, 'Must include uppercase')
+        .matches(/[a-z]/, 'Must include lowercase')
+        .matches(/[0-9]/, 'Must include number')
+        .matches(/[!@#$%^&*(),.?":{}|<>]/, 'Must include special char'),
+    role: Yup.string().oneOf(['Client', 'Driver', 'Admin']).required()
 });
 
+export const logInSchema = Yup.object().shape({
+    email: Yup.string().email().required(),
+    password: Yup.string().required(),
+    role: Yup.string().oneOf(['Client', 'Driver', 'Admin']).required()
+});
+
+export const validateSchema = async (schema, data) => {
+    try {
+        await schema.validate(data, { abortEarly: false });
+        return { valid: true };
+    } catch (error) {
+        return {
+            valid: false,
+            errors: error.errors || ['Validation failed']
+        };
+    }
+};

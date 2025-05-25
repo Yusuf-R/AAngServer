@@ -17,5 +17,10 @@ authRouter.post('/oauth', AuthController.socialSignIn);
 authRouter.post('/refresh', AuthController.refreshToken);
 authRouter.post('/signup', AuthController.signUp);
 authRouter.post('/login', AuthController.logIn);
+authRouter.post('/get-token', AuthController.getToken);
+authRouter.post('/verify-email', AuthController.verifyEmail);
+authRouter.post('/forgot-password-token', AuthController.forgotPasswordToken);
+authRouter.post('/reset-password', AuthController.resetPassword);
+authRouter.post('/update-password', AuthController.updatePassword);
 
 module.exports = authRouter;

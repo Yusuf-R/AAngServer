@@ -6,10 +6,10 @@ import RefreshToken from "../models/RefreshToken";
 import bcrypt from 'bcrypt';
 import {OAuth2Client} from 'google-auth-library';
 import redisClient from '../utils/redis';
-import crypto from 'crypto';
 import nodemailer from 'nodemailer';
 import {UAParser} from 'ua-parser-js';
 import MailClient from '../utils/mailer';
+import {logInSchema, resetPasswordSchema, signUpSchema, validateSchema} from "../validators/validateAuth";
 
 // Environment variables
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -565,6 +565,7 @@ class AuthController {
         try {
             return jwt.verify(token, accessSecret, {ignoreExpiration: true});
         } catch (err) {
+
             throw new Error('Invalid access token');
         }
     }
@@ -612,14 +613,116 @@ class AuthController {
         return {accessToken, newRefreshToken};
     }
 
+
+    /**
+     * Api PreCheck before any sensitive request
+     */
+    static async apiPreCheck(req) {
+        try {
+            const authHeader = req.headers.authorization;
+
+            if (!authHeader || !authHeader.startsWith('Bearer ')) {
+                return {
+                    success: false,
+                    error: 'Missing or malformed Authorization header',
+                    statusCode: 401
+                };
+            }
+
+            const accessToken = authHeader.split(' ')[1];
+            if (!accessToken) {
+                return {
+                    success: false,
+                    error: 'Missing access token',
+                    statusCode: 401
+                };
+            }
+
+            // Verify access token with expiration check
+            let decodedAccess;
+            try {
+                decodedAccess = jwt.verify(accessToken, accessSecret);
+            } catch (err) {
+                // Check if it's specifically an expiration error
+                if (err.name === 'TokenExpiredError') {
+                    return {
+                        success: false,
+                        error: 'Access token expired', // ✅ Matches FE .includes("expired")
+                        statusCode: 401,
+                        tokenExpired: true // Additional flag for reliability
+                    };
+                }
+
+                // Other JWT errors (malformed, invalid signature, etc.)
+                return {
+                    success: false,
+                    error: 'Invalid access token',
+                    statusCode: 401
+                };
+            }
+
+            if (!decodedAccess || !decodedAccess.id) {
+                return {
+                    success: false,
+                    error: 'Invalid access token payload',
+                    statusCode: 401
+                };
+            }
+
+            // Optional: Verify user still exists and is active
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(decodedAccess.id);
+
+            if (!user) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                    statusCode: 404
+                };
+            }
+
+            if (user.status === 'inactive' || user.status === 'suspended') {
+                return {
+                    success: false,
+                    error: 'User account is not active',
+                    statusCode: 403
+                };
+            }
+
+            // Success case - return user data for use in the endpoint
+            return {
+                success: true,
+                userData: user,
+                accessToken
+            };
+
+        } catch (err) {
+            console.error('API PreCheck Error:', err);
+            return {
+                success: false,
+                error: 'Authentication verification failed',
+                statusCode: 500
+            };
+        }
+    }
+
     /**
      * User registration with credentials
      */
     static async signUp(req, res) {
+
         const {email, password, role} = req.body;
 
         if (!email || !password || !role) {
             return res.status(400).json({error: 'Missing required fields'});
+        }
+
+        const roleCapitalized = role.charAt(0).toUpperCase() + role.slice(1);
+        req.body.role = roleCapitalized;
+
+        const validation = await validateSchema(signUpSchema, req.body);
+        if (!validation.valid) {
+            return res.status(400).json({ error: validation.errors.join(', ') });
         }
 
         try {
@@ -641,7 +744,7 @@ class AuthController {
 
             // Hash password
             const hashedPassword = await AuthController.hashPassword(password);
-            const roleCapitalized = role.charAt(0).toUpperCase() + role.slice(1);
+
 
             // Generate email verification token [length 6, alphaNumeric]
             const verificationToken = AuthController.generateVerificationToken();
@@ -703,6 +806,14 @@ class AuthController {
 
         if (!email || !password || !role) {
             return res.status(400).json({error: 'Email and password are required'});
+        }
+
+        req.body.role = role.charAt(0).toUpperCase() + role.slice(1);
+
+        const validation = await validateSchema(logInSchema, req.body);
+
+        if (!validation.valid) {
+            return res.status(400).json({ error: validation.errors.join(', ') });
         }
 
         try {
@@ -783,6 +894,7 @@ class AuthController {
      * Log out user and invalidate tokens
      */
     static async signOut(req, res) {
+
         try {
             const userId = req.user.id;
             const authHeader = req.headers.authorization;
@@ -811,67 +923,45 @@ class AuthController {
     }
 
     /**
-     * Verify email with token
+     * Get token
      */
-    static async verifyEmail(req, res) {
-        const {token} = req.body;
+    static async getToken(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
 
-        if (!token) {
-            return res.status(400).json({error: 'Verification token is required'});
-        }
-
-        try {
-            const {AAngBase} = await getModels();
-
-            const user = await AAngBase.findOne({
-                emailVerificationToken: token,
-                emailVerificationExpiry: {$gt: Date.now()}
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
-
-            if (!user) {
-                return res.status(400).json({error: 'Invalid or expired verification token'});
-            }
-
-            // Mark email as verified
-            user.emailVerified = true;
-            user.emailVerificationToken = undefined;
-            user.emailVerificationExpiry = undefined;
-
-            // Update credentials auth method as verified
-            const credentialsIndex = user.authMethods.findIndex(m => m.type === 'Credentials');
-            if (credentialsIndex !== -1) {
-                user.authMethods[credentialsIndex].verified = true;
-            }
-
-            await user.save();
-
-            return res.status(200).json({message: 'Email verified successfully'});
-        } catch (err) {
-            console.error('Email verification error:', err);
-            return res.status(500).json({error: 'Email verification failed'});
         }
-    }
 
-    /**
-     * Resend verification email
-     */
-    static async resendVerificationEmail(req, res) {
-        const userId = req.user.id;
+        // Extract user info from pre-check result
+        const { userData } = preCheckResult;
+        const userId = userData._id;
 
         try {
-            const {AAngBase} = await getModels();
-            const user = await AAngBase.findById(userId);
-
+            // Use userData from preCheck if available, otherwise fetch from DB
+            let user = userData;
             if (!user) {
-                return res.status(404).json({error: 'User not found'});
-            }
+                const {AAngBase} = await getModels();
+                user = await AAngBase.findById(userId);
 
-            if (user.emailVerified) {
+                if (!user) {
+                    return res.status(404).json({error: 'User not found'});
+                }
+            }
+            const {reqType} = req.body;
+            if (!reqType || (reqType !== 'Email' && reqType !== 'Password')) {
+                return res.status(400).json({error: 'Invalid reqType of token request'});
+            }
+            // if reqType is Email and Email has already been verified, return error
+            if (reqType === 'Email' && user.emailVerified) {
                 return res.status(400).json({error: 'Email is already verified'});
             }
 
             // Generate new verification token
-            const verificationToken = AuthController.generateVerificationToken();
+            const verificationToken = AuthController.generateVerificationToken({numericOnly: true});
             // Set token expiry to 15 mins
             const verificationTokenExpiry = Date.now() + 900000; // 15 minutes
 
@@ -881,15 +971,99 @@ class AuthController {
 
             // Send verification email token
             await MailClient.sendEmailToken(user.email, verificationToken);
+            console.log('Operation Successful');
 
-            return res.status(200).json({message: 'Verification email sent successfully'});
+            return res.status(201).json({message: 'Verification Token sent successfully'});
         } catch (err) {
-            console.error('Resend verification email error:', err);
-            return res.status(500).json({error: 'Failed to resend verification email'});
+            console.error('Process Error:', err);
+            return res.status(500).json({error: err});
         }
     }
 
-    /** Generated random OTP code of alphanumeric characters of length 6 **/
+    /**
+     * Verify email with token
+     */
+    static async verifyToken(reqType, token) {
+        const {AAngBase} = await getModels();
+
+        switch (reqType) {
+            case 'Email': {
+                const user = await AAngBase.findOne({
+                    emailVerificationToken: token,
+                    emailVerificationExpiry: {$gt: Date.now()},
+                });
+                if (!user) throw new Error('Invalid or expired email verification token');
+                return user;
+            }
+            case 'Password': {
+                const user = await AAngBase.findOne({
+                    passwordResetToken: token,
+                    passwordResetExpiry: {$gt: Date.now()},
+                });
+                if (!user) throw new Error('Invalid or expired password reset token');
+                return user;
+            }
+            default:
+                throw new Error('Unsupported verification type');
+        }
+    }
+
+    /**
+     * Verify email with token
+     */
+    static async verifyEmail(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+        const {token, reqType} = req.body;
+        if (!token || reqType !== 'Email') {
+            return res.status(400).json({error: 'Invalid request format or type'});
+        }
+
+        try {
+            const user = await AuthController.verifyToken(reqType, token);
+
+            user.emailVerified = true;
+            user.emailVerificationToken = undefined;
+            user.emailVerificationExpiry = undefined;
+
+            const credentialsIndex = user.authMethods.findIndex(m => m.type === 'Credentials');
+            if (credentialsIndex !== -1) {
+                user.authMethods[credentialsIndex].verified = true;
+            }
+
+            await user.save();
+
+            return res.status(200).json({
+                message: 'Email verified successfully',
+                accessToken: preCheckResult.accessToken,
+                user: {
+                    id: user._id,
+                    email: user.email,
+                    name: user.fullName,
+                    avatar: user.avatar,
+                    role: user.role.toLowerCase(),
+                    authMethods: user.authMethods.map(am => am.type),
+                    preferredAuthMethod: user.preferredAuthMethod,
+                    emailVerified: user.emailVerified || false
+                },
+                expiresIn: accessExpiresMs
+            });
+        } catch (err) {
+            console.error('Email verification failed:', err.message);
+            return res.status(400).json({error: err.message});
+        }
+    }
+
+    /**
+     * Generated random OTP code of alphanumeric characters of length 6
+     */
     static generateVerificationToken({length = 6, numericOnly = false} = {}) {
         const alphaNumChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
         const numericChars = '0123456789';
@@ -902,11 +1076,10 @@ class AuthController {
         return token;
     }
 
-
     /**
      * Request password reset
      */
-    static async forgotPassword(req, res) {
+    static async forgotPasswordToken(req, res) {
         const {email} = req.body;
 
         if (!email) {
@@ -930,28 +1103,17 @@ class AuthController {
             }
 
             // Generate reset token
-            const resetToken = crypto.randomBytes(32).toString('hex');
+            const resetToken = AuthController.generateVerificationToken({numericOnly: true});
             const resetTokenExpiry = Date.now() + 3600000; // 1 hour
 
             user.passwordResetToken = resetToken;
             user.passwordResetExpiry = resetTokenExpiry;
             await user.save();
 
-            // Send password reset email
-            const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
-            await transporter.sendMail({
-                to: email,
-                subject: 'Password Reset Request',
-                html: `
-                    <h1>Password Reset</h1>
-                    <p>You requested a password reset. Click the link below to set a new password:</p>
-                    <p><a href="${resetLink}">Reset Password</a></p>
-                    <p>This link will expire in 1 hour.</p>
-                    <p>If you didn't request this, please ignore this email.</p>
-                `
-            });
+            // Send reset token to email
+            await MailClient.passwordResetToken(user.email, resetToken);
 
-            return res.status(200).json({message: 'If an account with this email exists, a password reset link has been sent'});
+            return res.status(201).json({message: 'Password reset token sent'});
         } catch (err) {
             console.error('Forgot password error:', err);
             return res.status(500).json({error: 'Failed to process password reset request'});
@@ -962,6 +1124,7 @@ class AuthController {
      * Reset password with token
      */
     static async resetPassword(req, res) {
+
         const {token, newPassword} = req.body;
 
         if (!token || !newPassword) {
@@ -969,26 +1132,20 @@ class AuthController {
         }
 
         try {
-            const {AAngBase} = await getModels();
+            await resetPasswordSchema.validate(req.body);
 
-            const user = await AAngBase.findOne({
-                passwordResetToken: token,
-                passwordResetExpiry: {$gt: Date.now()}
-            });
+            const user = await AuthController.verifyToken('Password', token);
 
-            if (!user) {
-                return res.status(400).json({error: 'Invalid or expired reset token'});
-            }
+            const {AAngBase, RefreshToken} = await getModels();
 
-            // Hash new password
-            const hashedPassword = await AuthController.hashPassword(newPassword);
+            // Hash and update the new password
+            user.password = await AuthController.hashPassword(newPassword);
 
-            // Update user
-            user.password = hashedPassword;
+            // Clear reset token fields
             user.passwordResetToken = undefined;
             user.passwordResetExpiry = undefined;
 
-            // Update password change timestamp in auth methods
+            // Update password change timestamp in Credentials
             const credentialsIndex = user.authMethods.findIndex(m => m.type === 'Credentials');
             if (credentialsIndex !== -1) {
                 user.authMethods[credentialsIndex].lastUpdated = new Date();
@@ -999,33 +1156,44 @@ class AuthController {
             // Invalidate all refresh tokens
             await RefreshToken.deleteMany({userId: user._id});
 
-            // Remove all session tokens
+            // Clear session tokens
             await AAngBase.updateOne(
-                {_id: user._id},
+                {_id: user._id },
                 {$set: {sessionTokens: []}}
             );
 
             return res.status(200).json({message: 'Password reset successfully'});
         } catch (err) {
-            console.error('Reset password error:', err);
-            return res.status(500).json({error: 'Failed to reset password'});
+            const errorMessage = err.name === 'ValidationError' ? err.message : 'Failed to reset password';
+            console.error('Reset password error:', err.message);
+            return res.status(400).json({ error: errorMessage });
         }
     }
 
     /**
      * Change password (authenticated user)
      */
-    static async changePassword(req, res) {
+    static async updatePassword(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
         const {currentPassword, newPassword} = req.body;
-        const userId = req.user.id;
 
         if (!currentPassword || !newPassword) {
             return res.status(400).json({error: 'Current password and new password are required'});
         }
+        const {userData} = preCheckResult;
+
 
         try {
             const {AAngBase} = await getModels();
-            const user = await AAngBase.findById(userId);
+            const user = await AAngBase.findById(userData._id);
 
             if (!user) {
                 return res.status(404).json({error: 'User not found'});
@@ -1046,8 +1214,7 @@ class AuthController {
             }
 
             // Update password
-            const hashedPassword = await AuthController.hashPassword(newPassword);
-            user.password = hashedPassword;
+            user.password = await AuthController.hashPassword(newPassword);
 
             // Update password change timestamp in auth methods
             const credentialsIndex = user.authMethods.findIndex(m => m.type === 'Credentials');
@@ -1072,7 +1239,6 @@ class AuthController {
                 {_id: user._id},
                 {$pull: {sessionTokens: {token: {$ne: currentToken}}}}
             );
-
             return res.status(200).json({message: 'Password changed successfully'});
         } catch (err) {
             console.error('Change password error:', err);

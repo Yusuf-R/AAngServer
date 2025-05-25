@@ -27,7 +27,7 @@ class MailClient {
                 to: email,
                 subject: 'Password Reset Token',
                 html: `
-                    <p>Dear ${fullName},</p>
+                    <h1>Welcome to AAngLogistics Service</h1>
                     <p>To reset your password, please use the following token:</p>
                     <h3>${token}</h3>
                     <p>This token is valid for 5 minutes. Do not share it with anyone.</p>
