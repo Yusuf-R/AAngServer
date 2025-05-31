@@ -22,5 +22,13 @@ authRouter.post('/verify-email', AuthController.verifyEmail);
 authRouter.post('/forgot-password-token', AuthController.forgotPasswordToken);
 authRouter.post('/reset-password', AuthController.resetPassword);
 authRouter.post('/update-password', AuthController.updatePassword);
+authRouter.post('/set-pin', AuthController.setAuthPin);
+authRouter.put('/update-pin', AuthController.updateAuthPin);
+authRouter.post('/reset-pin', AuthController.resetAuthPin);
+authRouter.post('/pin-token', AuthController.requestAuthPinToken);
+authRouter.post('/verify-pin', AuthController.verifyAuthPin);
+authRouter.patch('/toggle-pin', AuthController.toggleAuthPin);
+authRouter.delete('/remove-pin', AuthController.removeAuthPin);
+authRouter.get('/status-pim', AuthController.getAuthPinStatus);
 
 module.exports = authRouter;

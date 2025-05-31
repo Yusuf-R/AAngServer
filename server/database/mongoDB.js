@@ -22,6 +22,9 @@ class MongoDBClient {
             console.log("👺 Error: Invalid/Missing environment variable MONGODB_URI 🚨");
             return;
         }
+        // mongoose.set('strictQuery', true);
+        // mongoose.set('debug', true); // ✅ Enable debug mode to log all MongoDB operations
+
 
         // Attempt to connect
         try {

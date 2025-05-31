@@ -4,27 +4,24 @@ import dbClient from "../../database/mongoDB";
 
 const { Schema, model } = mongoose;
 
-// Connect if not already connected
 const connectDB = async () => {
     if (mongoose.connection.readyState !== 1) {
         await dbClient.connect();
     }
 };
 
-// Core schema shared by all roles
 const baseOptions = {
     discriminatorKey: "role",
     timestamps: true,
 };
 
-// Authentication methods schema
 const AuthMethodSchema = new Schema({
     type: {
         type: String,
-        enum: ['Google', 'Apple', 'Credentials'],
+        enum: ['Google', 'Apple', 'Credentials', 'AuthPin'],
         required: true
     },
-    providerId: String,  // googleId, appleId, etc.
+    providerId: String,
     verified: {
         type: Boolean,
         default: false
@@ -45,26 +42,41 @@ const AAngSchema = new Schema({
     password: {
         type: String,
         required: function() {
-            // Password is required only if Credentials auth method exists
-            return this.authMethods &&
-                this.authMethods.some(method => method.type === 'Credentials');
+            return this.authMethods && this.authMethods.some(method => method.type === 'Credentials');
         }
     },
     fullName: String,
     avatar: String,
     status: {
         type: String,
-        enum: [
-            "Active", "Inactive", "Suspended", "Banned",
-            "Deleted", "Pending", "Blocked",
-        ],
+        enum: ["Active", "Inactive", "Suspended", "Banned", "Deleted", "Pending", "Blocked"],
         default: "Active",
     },
     phoneNumber: String,
     dob: String,
     gender: { type: String, enum: ["Male", "Female"] },
 
-    // New auth structure
+    authPin: {
+        pin: { type: String },
+        isEnabled: { type: Boolean, default: false },
+        createdAt: { type: Date, default: Date.now },
+        lastUsed: { type: Date },
+        failedAttempts: { type: Number, default: 0 },
+        lockedUntil: { type: Date }
+    },
+
+    pinVerificationToken: {
+        token: String,
+        email: String,
+        purpose: { type: String, enum: ['CHANGE_PIN', 'RESET_PIN'] },
+        createdAt: { type: Date },
+        expiresAt: {
+            type: Date,
+            default: () => new Date(Date.now() + 10 * 60 * 1000)
+        },
+        used: { type: Boolean, default: false }
+    },
+
     authMethods: {
         type: [AuthMethodSchema],
         validate: {
@@ -75,21 +87,18 @@ const AAngSchema = new Schema({
         }
     },
 
-    // Preferred auth method
     preferredAuthMethod: {
         type: String,
-        enum: ['Google', 'Apple', 'Credentials'],
+        enum: ['Google', 'Apple', 'Credentials', 'AuthPin'],
         default: 'Credentials'
     },
 
-    // For backward compatibility
     provider: {
         type: String,
-        enum: ['Google', 'Apple', 'Credentials'],
+        enum: ['Google', 'Apple', 'Credentials', 'AuthPin'],
         default: 'Credentials'
     },
 
-    // Session handling
     sessionTokens: [{
         token: String,
         device: String,
@@ -98,45 +107,48 @@ const AAngSchema = new Schema({
         lastActive: { type: Date, default: Date.now }
     }],
 
-    // Password reset
     resetPasswordToken: String,
     resetPasswordExpiry: Date,
 
-    // Email verification
     emailVerificationToken: String,
     emailVerificationExpiry: Date,
-    emailVerified: {
-        type: Boolean,
-        default: false
-    }
+    emailVerified: { type: Boolean, default: false },
+
+    authPinResetToken: String,
+    authPinResetExpiry: Date
 }, baseOptions);
 
-// Virtual property to check if user has password
 AAngSchema.virtual('hasPassword').get(function() {
     return !!this.password;
 });
 
-// Pre-save middleware to update legacy fields
+AAngSchema.virtual('pinStatus').get(function() {
+    return {
+        isSet: !!(this.authPin && this.authPin.pin),
+        setDate: this.authPin?.createdAt,
+        lastChanged: this.authPin?.createdAt,
+        canChange: this.emailVerified,
+        isLocked: this.authPin?.lockedUntil && this.authPin.lockedUntil > new Date(),
+        attemptsRemaining: Math.max(0, 5 - (this.authPin?.failedAttempts || 0))
+    };
+});
+
 AAngSchema.pre('save', function(next) {
-    // Update provider field based on preferred auth method
     if (this.preferredAuthMethod) {
         this.provider = this.preferredAuthMethod;
     } else if (this.authMethods && this.authMethods.length > 0) {
-        // Set preferred auth method to first method if not set
         this.preferredAuthMethod = this.authMethods[0].type;
         this.provider = this.authMethods[0].type;
     }
     next();
 });
 
-// Address Schema for users (unchanged)
+// 🛑 Removed TTL index on pinVerificationToken.expiresAt (was deleting full document)
+
 const AddressSchema = new Schema({
     category: {
         type: String,
-        enum: [
-            "Home", "School", "Office", "MarketPlace", "Mosque",
-            "Church", "Hospital", "Hotel", "SuperMarket", "Others"
-        ],
+        enum: ["Home", "School", "Office", "MarketPlace", "Mosque", "Church", "Hospital", "Hotel", "SuperMarket", "Others"],
         required: true,
     },
     latitude: Number,
@@ -145,13 +157,11 @@ const AddressSchema = new Schema({
     description: String,
 }, { _id: true });
 
-// User-specific schema (unchanged)
 const ClientSchema = new Schema({
     addresses: { type: [AddressSchema], default: [] },
     rideHistory: { type: Array, default: [] },
 });
 
-// Driver-specific schema (unchanged)
 const DriverSchema = new Schema({
     licenseNumber: String,
     vehicleType: String,
@@ -163,7 +173,6 @@ const DriverSchema = new Schema({
     },
 });
 
-// Admin schema (unchanged)
 const AdminSchema = new Schema({
     permissions: {
         type: [String],

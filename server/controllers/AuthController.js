@@ -146,7 +146,6 @@ class AuthController {
      */
     static async socialSignIn(req, res) {
         const {tokenResponse, provider, role} = req.body;
-        console.log({req});
 
         if (!tokenResponse || !provider || !role) {
             return res.status(400).json({error: 'Invalid request: Missing requirements'});
@@ -243,18 +242,13 @@ class AuthController {
                 authMethod: 'Google'
             });
 
+            // get userDashboard data
+            const userDashboard = await AuthController.userDashBoardData(user)
+
             return res.status(201).json({
                 accessToken,
                 refreshToken,
-                user: {
-                    id: user._id,
-                    email: user.email,
-                    name: user.fullName,
-                    avatar: user.avatar,
-                    role: user.role.toLowerCase(),
-                    authMethods: user.authMethods.map(am => am.type),
-                    preferredAuthMethod: user.preferredAuthMethod
-                },
+                user: userDashboard,
                 expiresIn: accessExpiresMs
             });
 
@@ -473,7 +467,111 @@ class AuthController {
     }
 
     /**
-     * Refresh token handler
+     * Intelligent token rotation - only rotate RT when close to expiry
+     * @param {Object} user - User object
+     * @param {string} authMethod - Authentication method
+     * @param {Object} decodedRefreshToken - Decoded refresh token payload
+     * @param {Object} storedRefreshToken - Stored refresh token from DB
+     * @returns {Object} - { accessToken, refreshToken, rotated }
+     */
+    static async intelligentTokenRotation(user, authMethod, decodedRefreshToken, storedRefreshToken) {
+        try {
+            // Always generate a new access token
+            const newAccessToken = jwt.sign(
+                {
+                    id: user._id,
+                    role: user.role,
+                    email: user.email
+                },
+                accessSecret,
+                {
+                    expiresIn: accessExpires,
+                    algorithm: 'HS256'
+                }
+            );
+
+            // Check if refresh token needs rotation
+            const shouldRotate = await AuthController.shouldRotateRefreshToken(decodedRefreshToken);
+
+            let newRefreshToken = null;
+            let rotated = false;
+
+            if (shouldRotate) {
+                console.log('🔄 Rotating refresh token due to approaching expiry');
+
+                // Generate new refresh token
+                newRefreshToken = jwt.sign(
+                    {
+                        id: user._id,
+                        authMethod
+                    },
+                    refreshSecret,
+                    {
+                        expiresIn: refreshExpires,
+                        algorithm: 'HS256'
+                    }
+                );
+
+                // Update the stored refresh token with new token and expiry
+                storedRefreshToken.token = newRefreshToken;
+                storedRefreshToken.expiresAt = new Date(Date.now() + ms(refreshExpires));
+                storedRefreshToken.lastUsed = new Date();
+                await storedRefreshToken.save();
+
+                rotated = true;
+                console.log('✅ Refresh token successfully rotated');
+            } else {
+                // Just update the last used timestamp
+                storedRefreshToken.lastUsed = new Date();
+                await storedRefreshToken.save();
+
+                console.log('ℹ️ Refresh token still valid, only updating lastUsed timestamp');
+            }
+
+            return {
+                accessToken: newAccessToken,
+                refreshToken: newRefreshToken, // null if not rotated
+                rotated
+            };
+
+        } catch (error) {
+            console.error('❌ Intelligent token rotation error:', error);
+            throw new Error('Failed to rotate tokens');
+        }
+    }
+
+    /**
+     * Enhanced refresh token rotation logic
+     * @param {Object} decodedRefresh - The decoded refresh token payload
+     * @param {number} rotationThreshold - Hours before expiry to rotate (default: 24)
+     * @returns {boolean} - Whether token should be rotated
+     */
+    static async shouldRotateRefreshToken(decodedRefresh, rotationThreshold = 24) {
+        if (!decodedRefresh || !decodedRefresh.exp) {
+            console.log('⚠️ Invalid refresh token payload for rotation check');
+            return false;
+        }
+
+        const currentTime = Math.floor(Date.now() / 1000); // Current time in seconds
+        const timeLeft = decodedRefresh.exp - currentTime; // Time left in seconds
+        const hoursLeft = timeLeft / 3600; // Convert to hours
+
+        console.log(`🕐 Refresh token has ${hoursLeft.toFixed(2)} hours left`);
+
+        // Rotate if less than threshold hours left
+        const shouldRotate = hoursLeft <= rotationThreshold;
+
+        if (shouldRotate) {
+            console.log(`🔄 Refresh token will be rotated (${hoursLeft.toFixed(2)}h < ${rotationThreshold}h threshold)`);
+        } else {
+            console.log(`✅ Refresh token is still fresh (${hoursLeft.toFixed(2)}h > ${rotationThreshold}h threshold)`);
+        }
+
+        return shouldRotate;
+    }
+
+    /**
+     * Enhanced refresh token handler with intelligent rotation
      */
     static async refreshToken(req, res) {
         try {
@@ -484,25 +582,43 @@ class AuthController {
                 return res.status(400).json({error: 'Refresh token required in body'});
             }
 
-            // Extract and verify tokens
+            // Extract and verify access token (for session tracking)
             const oldAccessToken = AuthController.extractAccessToken(authHeader);
-
             let decodedAccess;
+
+
             try {
                 decodedAccess = AuthController.verifyAccessToken(oldAccessToken);
             } catch (error) {
-                // Continue with refresh token if access token is invalid/expired
+                // Access token is expired/invalid - this is expected in refresh scenarios
+                console.log('ℹ️ Access token invalid/expired during refresh - this is normal');
             }
 
-            const decodedRefresh = AuthController.verifyRefreshToken(refreshToken);
+            // Verify refresh token JWT
+            let decodedRefresh;
+            try {
+                decodedRefresh = AuthController.verifyRefreshToken(refreshToken);
+            } catch (jwtError) {
+                // Handle expired JWT with cleanup
+                if (jwtError.name === 'TokenExpiredError') {
+                    await AuthController.cleanupExpiredToken(refreshToken);
+                    return res.status(401).json({error: 'Refresh token expired'});
+                }
+                return res.status(401).json({error: 'Invalid refresh token'});
+            }
 
             if (!decodedRefresh || !decodedRefresh.id) {
                 return res.status(401).json({error: 'Invalid refresh token'});
             }
 
-            // Validate token in database
-            const stored = await AuthController.validateRefreshTokenInDB(decodedRefresh.id, refreshToken);
-            if (!stored) {
+            // Validate refresh token in database
+            const storedRefreshToken = await AuthController.validateRefreshTokenInDB(
+                decodedRefresh.id,
+                refreshToken
+            );
+
+            if (!storedRefreshToken) {
+                console.log('❌ Refresh token not found or expired in database');
                 return res.status(403).json({error: 'Refresh token not found or revoked'});
             }
 
@@ -511,19 +627,30 @@ class AuthController {
             const user = await AAngBase.findById(decodedRefresh.id);
 
             if (!user) {
+                console.log('❌ User not found for refresh token');
                 return res.status(404).json({error: 'User not found'});
             }
 
-            // Generate new tokens
+            // Check user status
+            if (['inactive', 'suspended', 'banned'].includes(user.status.toLowerCase())) {
+                // we can do something extra here maybe -- like deleting that refreshToken from the db -- later
+                return res.status(403).json({error: 'User account is not active'});
+            }
+
+            // Perform intelligent token rotation
             const authMethod = decodedRefresh.authMethod || user.preferredAuthMethod;
-            const {accessToken, newRefreshToken} = await AuthController.rotateTokens(user, authMethod);
+            const {
+                accessToken,
+                refreshToken: newRefreshToken,
+                rotated
+            } = await AuthController.intelligentTokenRotation(
+                user,
+                authMethod,
+                decodedRefresh,
+                storedRefreshToken
+            );
 
-            // Update refresh token in database
-            stored.token = newRefreshToken;
-            stored.lastUsed = new Date();
-            await stored.save();
-
-            // Update last active for session
+            // Update session tracking if we have valid access token info
             if (decodedAccess && decodedAccess.id) {
                 await AAngBase.updateOne(
                     {
@@ -536,15 +663,59 @@ class AuthController {
                 );
             }
 
-            return res.status(200).json({
+            // Add new session token for the new access token
+            const deviceInfo = AuthController.getDeviceInfo(req.headers['user-agent']);
+            const deviceString = `${deviceInfo.browser} on ${deviceInfo.os} (${deviceInfo.device})`;
+
+            await AAngBase.updateOne(
+                {_id: user._id},
+                {
+                    $push: {
+                        sessionTokens: {
+                            token: accessToken,
+                            device: deviceString,
+                            ip: req.ip || null,
+                            createdAt: new Date(),
+                            lastActive: new Date()
+                        }
+                    }
+                }
+            );
+
+            // Prepare response
+            const response = {
                 accessToken,
-                refreshToken: newRefreshToken,
+                refreshToken: rotated ? newRefreshToken : null, // Only include if rotated
                 expiresIn: accessExpiresMs,
-            });
+                message: rotated ? 'Tokens refreshed and rotated' : 'Access token refreshed'
+
+            };
+
+            console.log(`✅ Token refresh successful for user ${user.email} (rotated: ${rotated})`);
+
+            return res.status(200).json(response);
 
         } catch (err) {
-            console.error('[RefreshToken Error]', err.message);
+            console.error('❌ [RefreshToken Error]', err.message);
             return res.status(401).json({error: 'Invalid or expired tokens'});
+        }
+    }
+
+    /**
+     * Clean up expired token when JWT verification fails
+     */
+    static async cleanupExpiredToken(refreshToken) {
+        try {
+            const decoded = jwt.decode(refreshToken); // Decode without verification
+            if (decoded && decoded.id) {
+                const result = await RefreshToken.deleteOne({
+                    userId: decoded.id,
+                    token: refreshToken
+                });
+                console.log(`🗑️ Cleaned up expired refresh token (deleted: ${result.deletedCount})`);
+            }
+        } catch (cleanupErr) {
+            console.error('Error cleaning up expired refresh token:', cleanupErr.message);
         }
     }
 
@@ -565,7 +736,6 @@ class AuthController {
         try {
             return jwt.verify(token, accessSecret, {ignoreExpiration: true});
         } catch (err) {
-
             throw new Error('Invalid access token');
         }
     }
@@ -573,8 +743,12 @@ class AuthController {
     /**
      * Verify refresh token
      */
-    static verifyRefreshToken(token) {
+    static verifyRefreshToken(token, expiryFlag = false) {
         try {
+            if (expiryFlag) {
+                // If expiryFlag is true, ignore expiration for this verification
+                return jwt.verify(token, refreshSecret, {ignoreExpiration: true});
+            }
             return jwt.verify(token, refreshSecret);
         } catch (err) {
             throw new Error('Invalid refresh token');
@@ -582,37 +756,46 @@ class AuthController {
     }
 
     /**
-     * Validate refresh token in database
+     * Validate refresh token in database with better error handling
      */
     static async validateRefreshTokenInDB(userId, token) {
-        const stored = await RefreshToken.findOne({userId, token});
-        if (!stored) return null;
-        if (stored.isExpired()) {
-            await stored.remove();
+        try {
+            const refreshToken = await RefreshToken.findOne({userId, token}).populate('userId');
+
+            if (!refreshToken) {
+                console.log('❌ Refresh token not found in database');
+                return null;
+            }
+
+            // Check if token is expired
+            if (refreshToken.isExpired()) {
+                console.log('⏰ Refresh token expired, cleaning up...');
+                await refreshToken.deleteOne();
+                return null;
+            }
+
+            return refreshToken;
+        } catch (error) {
+            console.error('Error finding valid token:', error);
             return null;
         }
-        return stored;
     }
 
     /**
-     * Generate new tokens
+     * Clean up expired refresh tokens manually (optional cleanup job)
      */
-    static async rotateTokens(user, authMethod) {
-        const accessToken = jwt.sign(
-            {id: user._id, role: user.role, email: user.email},
-            accessSecret,
-            {expiresIn: accessExpires, algorithm: 'HS256'}
-        );
-
-        const newRefreshToken = jwt.sign(
-            {id: user._id, authMethod},
-            refreshSecret,
-            {expiresIn: refreshExpires, algorithm: 'HS256'}
-        );
-
-        return {accessToken, newRefreshToken};
+    static async cleanupExpiredTokens() {
+        try {
+            const result = await RefreshToken.deleteMany({
+                expiresAt: {$lt: new Date()}
+            });
+            console.log(`Cleaned up ${result.deletedCount} expired refresh tokens`);
+            return result.deletedCount;
+        } catch (error) {
+            console.error('Error cleaning up expired tokens:', error);
+            return 0;
+        }
     }
-
 
     /**
      * Api PreCheck before any sensitive request
@@ -710,6 +893,7 @@ class AuthController {
      * User registration with credentials
      */
     static async signUp(req, res) {
+        console.log('trying to SignUp');
 
         const {email, password, role} = req.body;
 
@@ -722,7 +906,7 @@ class AuthController {
 
         const validation = await validateSchema(signUpSchema, req.body);
         if (!validation.valid) {
-            return res.status(400).json({ error: validation.errors.join(', ') });
+            return res.status(400).json({error: validation.errors.join(', ')});
         }
 
         try {
@@ -745,12 +929,6 @@ class AuthController {
             // Hash password
             const hashedPassword = await AuthController.hashPassword(password);
 
-
-            // Generate email verification token [length 6, alphaNumeric]
-            const verificationToken = AuthController.generateVerificationToken();
-            // Set token expiry to 15 mins
-            const verificationTokenExpiry = Date.now() + 900000; // 15 minutes
-
             // Create user
             user = await AAngBase.create({
                 email,
@@ -763,11 +941,7 @@ class AuthController {
                 }],
                 preferredAuthMethod: 'Credentials',
                 provider: 'Credentials', // Backward compatibility
-                emailVerificationToken: verificationToken,
-                emailVerificationExpiry: verificationTokenExpiry
             });
-
-            await MailClient.sendEmailToken(email, verificationToken);
 
             // Generate tokens
             const {accessToken, refreshToken} = await AuthController.generateJWT(user, {
@@ -776,20 +950,14 @@ class AuthController {
                 authMethod: 'Credentials'
             });
 
+            // get userDashboard data
+            const userDashboard = await AuthController.userDashBoardData(user)
+
             return res.status(201).json({
                 accessToken,
                 refreshToken,
-                user: {
-                    id: user._id,
-                    email: user.email,
-                    name: user.fullName,
-                    role: user.role.toLowerCase(),
-                    authMethods: ['Credentials'],
-                    preferredAuthMethod: 'Credentials',
-                    emailVerified: false
-                },
+                user: userDashboard,
                 expiresIn: accessExpiresMs,
-                message: 'Verification email sent. Please check your inbox.'
             });
 
         } catch (err) {
@@ -802,6 +970,7 @@ class AuthController {
      * User login with credentials
      */
     static async logIn(req, res) {
+        console.log('trying to login');
         const {email, password, role} = req.body;
 
         if (!email || !password || !role) {
@@ -813,7 +982,7 @@ class AuthController {
         const validation = await validateSchema(logInSchema, req.body);
 
         if (!validation.valid) {
-            return res.status(400).json({ error: validation.errors.join(', ') });
+            return res.status(400).json({error: validation.errors.join(', ')});
         }
 
         try {
@@ -824,6 +993,7 @@ class AuthController {
             const user = await AAngBase.findOne({email});
 
             if (!user) {
+                console.log('User not found')
                 return res.status(401).json({error: 'Invalid email or password'});
             }
 
@@ -868,24 +1038,18 @@ class AuthController {
                 authMethod: 'Credentials'
             });
 
-            return res.status(200).json({
+            // get userDashboard data
+            const userDashboard = await AuthController.userDashBoardData(user)
+
+            return res.status(201).json({
                 accessToken,
                 refreshToken,
-                user: {
-                    id: user._id,
-                    email: user.email,
-                    name: user.fullName,
-                    avatar: user.avatar,
-                    role: user.role.toLowerCase(),
-                    authMethods: user.authMethods.map(am => am.type),
-                    preferredAuthMethod: user.preferredAuthMethod,
-                    emailVerified: user.emailVerified || false
-                },
+                user: userDashboard,
                 expiresIn: accessExpiresMs
             });
 
         } catch (err) {
-            console.error('Sign in error:', err);
+            console.error('Login error:', err);
             return res.status(500).json({error: 'Login failed'});
         }
     }
@@ -937,7 +1101,7 @@ class AuthController {
         }
 
         // Extract user info from pre-check result
-        const { userData } = preCheckResult;
+        const {userData} = preCheckResult;
         const userId = userData._id;
 
         try {
@@ -1040,19 +1204,14 @@ class AuthController {
 
             await user.save();
 
-            return res.status(200).json({
+            // get userDashboard data
+            const userDashboard = await AuthController.userDashBoardData(user)
+
+
+            return res.status(201).json({
                 message: 'Email verified successfully',
                 accessToken: preCheckResult.accessToken,
-                user: {
-                    id: user._id,
-                    email: user.email,
-                    name: user.fullName,
-                    avatar: user.avatar,
-                    role: user.role.toLowerCase(),
-                    authMethods: user.authMethods.map(am => am.type),
-                    preferredAuthMethod: user.preferredAuthMethod,
-                    emailVerified: user.emailVerified || false
-                },
+                user: userDashboard,
                 expiresIn: accessExpiresMs
             });
         } catch (err) {
@@ -1158,15 +1317,15 @@ class AuthController {
 
             // Clear session tokens
             await AAngBase.updateOne(
-                {_id: user._id },
+                {_id: user._id},
                 {$set: {sessionTokens: []}}
             );
 
-            return res.status(200).json({message: 'Password reset successfully'});
+            return res.status(201).json({message: 'Password reset successfully'});
         } catch (err) {
             const errorMessage = err.name === 'ValidationError' ? err.message : 'Failed to reset password';
             console.error('Reset password error:', err.message);
-            return res.status(400).json({ error: errorMessage });
+            return res.status(400).json({error: errorMessage});
         }
     }
 
@@ -1183,9 +1342,9 @@ class AuthController {
                 ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
-        const {currentPassword, newPassword} = req.body;
+        const {currPassword, newPassword} = req.body;
 
-        if (!currentPassword || !newPassword) {
+        if (!currPassword || !newPassword) {
             return res.status(400).json({error: 'Current password and new password are required'});
         }
         const {userData} = preCheckResult;
@@ -1207,7 +1366,7 @@ class AuthController {
             }
 
             // Verify current password
-            const isValidPassword = await AuthController.comparePasswords(currentPassword, user.password);
+            const isValidPassword = await AuthController.comparePasswords(currPassword, user.password);
 
             if (!isValidPassword) {
                 return res.status(401).json({error: 'Current password is incorrect'});
@@ -1221,8 +1380,9 @@ class AuthController {
             if (credentialsIndex !== -1) {
                 user.authMethods[credentialsIndex].lastUpdated = new Date();
             }
-
+            console.log('Got here')
             await user.save();
+            console.log('Data saved')
 
             // Keep current session but invalidate all other sessions
             const authHeader = req.headers.authorization;
@@ -1233,13 +1393,14 @@ class AuthController {
                 userId: user._id,
                 token: {$ne: req.body.refreshToken} // Keep current refresh token if provided
             });
+            console.log('See ya');
 
             // Remove all session tokens except current one
             await AAngBase.updateOne(
                 {_id: user._id},
                 {$pull: {sessionTokens: {token: {$ne: currentToken}}}}
             );
-            return res.status(200).json({message: 'Password changed successfully'});
+            return res.status(201).json({message: 'Password changed successfully'});
         } catch (err) {
             console.error('Change password error:', err);
             return res.status(500).json({error: 'Failed to change password'});
@@ -1376,6 +1537,695 @@ class AuthController {
     static async comparePasswords(password, hash) {
         return bcrypt.compare(password, hash);
     }
+
+    // AuthPin Methods to be added to your existing AuthController class
+
+    /**
+     * Set AuthPin for user account
+     */
+    static async setAuthPin(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {pin, confirmPin} = req.body;
+        const {userData} = preCheckResult;
+
+        if (!pin || !confirmPin) {
+            return res.status(400).json({error: 'PIN is required'});
+        }
+
+        // Validate PIN format (4-6 digits)
+        if (!/^\d{4,6}$/.test(pin)) {
+            return res.status(400).json({error: 'PIN must be 4-6 digits'});
+        }
+        if (!/^\d{4,6}$/.test(confirmPin)) {
+            return res.status(400).json({error: 'PIN must be 4-6 digits'});
+        }
+        // Check if PINs match
+        if (pin !== confirmPin) {
+            return res.status(400).json({error: 'PINs do not match'});
+        }
+
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userData._id);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            // Check if user already has AuthPin set
+            if (user.authPin && user.authPin.pin) {
+                return res.status(400).json({error: 'AuthPin already exists. Use update method to change it.'});
+            }
+
+            // Hash the PIN
+            const hashedPin = await AuthController.hashPassword(pin);
+
+            // Set AuthPin
+            user.authPin = {
+                pin: hashedPin,
+                isEnabled: true,
+                createdAt: new Date(),
+                lastUsed: null,
+                failedAttempts: 0,
+                lockedUntil: null
+            };
+
+            // Add AuthPin to auth methods if not already present
+            const hasAuthPinMethod = user.authMethods?.some(method => method.type === 'AuthPin');
+            if (!hasAuthPinMethod) {
+                if (!user.authMethods) user.authMethods = [];
+                user.authMethods.push({
+                    type: 'AuthPin',
+                    verified: true,
+                    lastUsed: new Date()
+                });
+            }
+
+            await user.save();
+
+            // get userDashboard data
+            const userDashboard = await AuthController.userDashBoardData(user)
+
+
+            return res.status(201).json({
+                message: 'AuthPin set successfully',
+                user: userDashboard,
+            });
+
+        } catch (err) {
+            console.error('Set AuthPin error:', err);
+            return res.status(500).json({error: 'Failed to set AuthPin'});
+        }
+    }
+
+    /**
+     * Update existing AuthPin
+     */
+    static async updateAuthPin(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {email, token, newPin, reqType, currentPin} = req.body;
+
+        if (!email || !token || !newPin || !reqType || !currentPin) {
+            return res.status(400).json({error: 'Invalid credentials'});
+        }
+
+        // Validate request type
+        if (reqType !== 'updatePin') {
+            return res.status(400).json({error: 'Invalid request type'});
+        }
+
+        // validate current format
+        if (!/^\d{4,6}$/.test(currentPin)) {
+            return res.status(400).json({error: 'Invalid PIN'});
+        }
+
+        // Validate new PIN format
+        if (!/^\d{4,6}$/.test(newPin)) {
+            return res.status(400).json({error: 'Invalid PIN'});
+        }
+
+        // Validate token format (5 char alphanumeric capitalized)
+        if (!/^[A-Z0-9]{5}$/.test(token)) {
+            return res.status(400).json({error: 'Invalid token format'});
+        }
+
+        // Prevent same PIN
+        if (currentPin === newPin) {
+            return res.status(400).json({error: 'New PIN must be different from current PIN'});
+        }
+
+        const {userData} = preCheckResult;
+
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userData._id);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            // Check if AuthPin exists and is enabled
+            if (!user.authPin || !user.authPin.pin || !user.authPin.isEnabled) {
+                return res.status(400).json({error: 'Forbidden: No AuthPin set or enabled'});
+            }
+
+            // Check if AuthPin is locked
+            if (user.authPin.lockedUntil && user.authPin.lockedUntil > new Date()) {
+                const lockTimeRemaining = Math.ceil((user.authPin.lockedUntil - new Date()) / 1000 / 60);
+                return res.status(423).json({
+                    error: `AuthPin is locked. Try again in ${lockTimeRemaining} minutes.`
+                });
+            }
+
+            // Verify current PIN
+            const isValidPin = await AuthController.comparePasswords(currentPin, user.authPin.pin);
+            if (!isValidPin) {
+                // Increment failed attempts
+                user.authPin.failedAttempts = (user.authPin.failedAttempts || 0) + 1;
+
+                // Lock if too many failed attempts (5 attempts = 15 min lock)
+                if (user.authPin.failedAttempts >= 5) {
+                    user.authPin.lockedUntil = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+                    await user.save();
+                    return res.status(423).json({
+                        error: 'Too many failed attempts. AuthPin locked for 15 minutes.'
+                    });
+                }
+
+                await user.save();
+                return res.status(401).json({
+                    error: 'Current PIN is incorrect',
+                    attemptsRemaining: 5 - user.authPin.failedAttempts
+                });
+            }
+
+            // Hash new PIN and update
+            user.authPin.pin = await AuthController.hashPassword(newPin);
+            user.authPin.failedAttempts = 0;
+            user.authPin.lockedUntil = null;
+            user.authPin.lastUsed = new Date();
+
+            // Update AuthPin method timestamp
+            const authPinIndex = user.authMethods.findIndex(m => m.type === 'AuthPin');
+            if (authPinIndex !== -1) {
+                user.authMethods[authPinIndex].lastUpdated = new Date();
+            } else {
+                // Add AuthPin method if it doesn't exist
+                user.authMethods.push({
+                    type: 'AuthPin',
+                    verified: true,
+                    lastUsed: new Date()
+                });
+            }
+
+            // Clear reset token
+            user.authPinResetToken = undefined;
+            user.authPinResetExpiry = undefined;
+
+            await user.save();
+
+            return res.status(201).json({message: 'AuthPin updated successfully'});
+
+        } catch (err) {
+            console.error('Update AuthPin error:', err);
+            return res.status(500).json({error: 'Failed to update AuthPin'});
+        }
+    }
+
+    /**
+     * Reset AuthPin (requires email verification)
+     */
+    static async resetAuthPin(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {email, token, newPin, reqType, confirmPin} = req.body;
+
+        if (!email || !token || !newPin || !reqType || !confirmPin) {
+            return res.status(400).json({error: 'Invalid credentials'});
+        }
+
+        // Validate new PIN format
+        if (!/^\d{4,6}$/.test(newPin)) {
+            return res.status(400).json({error: 'Invalid PIN'});
+        }
+
+        if (!/^\d{4,6}$/.test(confirmPin)) {
+            return res.status(400).json({error: 'Invalid PIN'});
+        }
+
+        // Validate token format (5 char alphanumeric capitalized)
+        if (!/^[A-Z0-9]{5}$/.test(token)) {
+            return res.status(400).json({error: 'Invalid token format'});
+        }
+
+        if (reqType !== 'resetPin') {
+            return res.status(400).json({error: 'Invalid request type'})
+        }
+
+        try {
+            const {AAngBase} = await getModels();
+
+            // Find user by email and verify token
+            const user = await AAngBase.findOne({
+                email,
+                authPinResetToken: token,
+                authPinResetExpiry: {$gt: Date.now()}
+            });
+
+            if (!user) {
+                return res.status(400).json({error: 'Invalid or expired reset token'});
+            }
+
+            // Hash new PIN and reset
+            const hashedNewPin = await AuthController.hashPassword(newPin);
+
+            user.authPin = {
+                pin: hashedNewPin,
+                isEnabled: true,
+                createdAt: user.authPin?.createdAt || new Date(),
+                lastUsed: new Date(),
+                failedAttempts: 0,
+                lockedUntil: null
+            };
+
+            // Clear reset token
+            user.authPinResetToken = undefined;
+            user.authPinResetExpiry = undefined;
+
+            // Update AuthPin method
+            const authPinIndex = user.authMethods.findIndex(m => m.type === 'AuthPin');
+            if (authPinIndex !== -1) {
+                user.authMethods[authPinIndex].lastUsed = new Date();
+                user.authMethods[authPinIndex].verified = true;
+            } else {
+                // Add AuthPin method if it doesn't exist
+                user.authMethods.push({
+                    type: 'AuthPin',
+                    verified: true,
+                    lastUsed: new Date()
+                });
+            }
+
+            await user.save();
+
+            return res.status(201).json({message: 'AuthPin reset successfully'});
+
+        } catch (err) {
+            console.error('Reset AuthPin error:', err);
+            return res.status(500).json({error: 'Failed to reset AuthPin'});
+        }
+    }
+
+    /**
+     * Request AuthPin reset token
+     */
+    static async requestAuthPinToken(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+        const {email} = req.body;
+
+        if (!email) {
+            return res.status(400).json({error: 'Email is required'});
+        }
+
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findOne({email});
+
+            // Don't reveal if user exists
+            if (!user) {
+                console.log('Error from here');
+                return res.status(400).json({
+                    error: 'Invalid request'
+                });
+            }
+
+            // check if the user email is verified
+            if (!user.emailVerified) {
+                return res.status(401).json({
+                    error: 'Unauthorized request'
+                })
+            }
+
+            // Check if user has AuthPin enabled
+            if (!user.authPin || !user.authPin.pin || !user.authPin.isEnabled) {
+                return res.status(400).json({
+                    message: 'Invalid request'
+                });
+            }
+
+            // Generate reset token -- mixture of number and letters and of lenthg 8
+            const resetToken = AuthController.generateVerificationToken({length: 5});
+            const resetTokenExpiry = Date.now() + 3600000; // 1 hour
+
+            user.authPinResetToken = resetToken;
+            user.authPinResetExpiry = resetTokenExpiry;
+            await user.save();
+
+            // Send reset token via email
+            try {
+                await MailClient.authResetToken(user.email, resetToken);
+            } catch (err) {
+                console.log(err);
+                return res.status(500).json({error: 'Mail Server internal error'});
+            }
+
+
+            return res.status(201).json({
+                message: 'Token sent to the verified associated account'
+            });
+
+        } catch (err) {
+            console.error('Request AuthPin reset error:', err);
+            return res.status(500).json({error: 'Failed to process AuthPin reset request'});
+        }
+    }
+
+    // might covert this to an internal function and not API base
+    /**
+     * Verify AuthPin for sensitive operations
+     */
+    static async verifyAuthPin(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {pin, operation} = req.body;
+        const {userData} = preCheckResult;
+
+        if (!pin) {
+            return res.status(400).json({error: 'PIN is required'});
+        }
+
+        if (!operation) {
+            return res.status(400).json({error: 'Operation type is required'});
+        }
+
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userData._id);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            // Check if AuthPin exists and is enabled
+            if (!user.authPin || !user.authPin.pin || !user.authPin.isEnabled) {
+                return res.status(400).json({error: 'AuthPin is not set or disabled'});
+            }
+
+            // Check if AuthPin is locked
+            if (user.authPin.lockedUntil && user.authPin.lockedUntil > new Date()) {
+                const lockTimeRemaining = Math.ceil((user.authPin.lockedUntil - new Date()) / 1000 / 60);
+                return res.status(423).json({
+                    error: `AuthPin is locked. Try again in ${lockTimeRemaining} minutes.`
+                });
+            }
+
+            // Verify PIN
+            const isValidPin = await AuthController.comparePasswords(pin, user.authPin.pin);
+            if (!isValidPin) {
+                // Increment failed attempts
+                user.authPin.failedAttempts = (user.authPin.failedAttempts || 0) + 1;
+
+                // Lock if too many failed attempts
+                if (user.authPin.failedAttempts >= 5) {
+                    user.authPin.lockedUntil = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+                    await user.save();
+                    return res.status(423).json({
+                        error: 'Too many failed attempts. AuthPin locked for 15 minutes.'
+                    });
+                }
+
+                await user.save();
+                return res.status(401).json({
+                    error: 'Invalid PIN',
+                    attemptsRemaining: 5 - user.authPin.failedAttempts
+                });
+            }
+
+            // PIN is valid - reset failed attempts and update last used
+            user.authPin.failedAttempts = 0;
+            user.authPin.lockedUntil = null;
+            user.authPin.lastUsed = new Date();
+
+            // Update AuthPin method timestamp
+            const authPinIndex = user.authMethods.findIndex(m => m.type === 'AuthPin');
+            if (authPinIndex !== -1) {
+                user.authMethods[authPinIndex].lastUsed = new Date();
+            }
+
+            await user.save();
+
+            // Generate verification token for the operation (valid for 10 minutes)
+            const verificationToken = jwt.sign(
+                {
+                    userId: user._id,
+                    operation,
+                    verified: true,
+                    verifiedAt: new Date()
+                },
+                accessSecret,
+                {expiresIn: '10m'}
+            );
+
+            return res.status(200).json({
+                message: 'AuthPin verified successfully',
+                verificationToken,
+                operation,
+                expiresIn: 600000 // 10 minutes in milliseconds
+            });
+
+        } catch (err) {
+            console.error('Verify AuthPin error:', err);
+            return res.status(500).json({error: 'Failed to verify AuthPin'});
+        }
+    }
+
+    /**
+     * Enable/Disable AuthPin
+     */
+    static async toggleAuthPin(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {enable, pin} = req.body;
+        const {userData} = preCheckResult;
+
+        if (typeof enable !== 'boolean') {
+            return res.status(400).json({error: 'Enable flag is required (true/false)'});
+        }
+
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userData._id);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            // Check if AuthPin exists
+            if (!user.authPin || !user.authPin.pin) {
+                return res.status(400).json({error: 'No AuthPin set. Use set method first.'});
+            }
+
+            if (enable) {
+                // Enabling - verify current PIN
+                if (!pin) {
+                    return res.status(400).json({error: 'PIN is required to enable AuthPin'});
+                }
+
+                const isValidPin = await AuthController.comparePasswords(pin, user.authPin.pin);
+                if (!isValidPin) {
+                    return res.status(401).json({error: 'Invalid PIN'});
+                }
+
+                user.authPin.isEnabled = true;
+                user.authPin.lastUsed = new Date();
+            } else {
+                // Disabling
+                user.authPin.isEnabled = false;
+            }
+
+            await user.save();
+
+            return res.status(200).json({
+                message: `AuthPin ${enable ? 'enabled' : 'disabled'} successfully`,
+                isEnabled: user.authPin.isEnabled
+            });
+
+        } catch (err) {
+            console.error('Toggle AuthPin error:', err);
+            return res.status(500).json({error: 'Failed to toggle AuthPin'});
+        }
+    }
+
+    /**
+     * Remove AuthPin completely
+     */
+    static async removeAuthPin(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {pin, password} = req.body;
+        const {userData} = preCheckResult;
+
+        // Require either PIN or password for security
+        if (!pin && !password) {
+            return res.status(400).json({error: 'Either current PIN or account password is required'});
+        }
+
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userData._id);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            // Check if AuthPin exists
+            if (!user.authPin || !user.authPin.pin) {
+                return res.status(400).json({error: 'No AuthPin set'});
+            }
+
+            let isAuthorized = false;
+
+            // Verify with PIN if provided
+            if (pin) {
+                isAuthorized = await AuthController.comparePasswords(pin, user.authPin.pin);
+            }
+
+            // Verify with password if PIN verification failed or wasn't provided
+            if (!isAuthorized && password && user.password) {
+                isAuthorized = await AuthController.comparePasswords(password, user.password);
+            }
+
+            if (!isAuthorized) {
+                return res.status(401).json({error: 'Invalid PIN or password'});
+            }
+
+            // Remove AuthPin
+            user.authPin = undefined;
+
+            // Remove AuthPin from auth methods
+            user.authMethods = user.authMethods.filter(method => method.type !== 'AuthPin');
+
+            // Update preferred auth method if it was AuthPin
+            if (user.preferredAuthMethod === 'AuthPin') {
+                user.preferredAuthMethod = user.authMethods.length > 0 ? user.authMethods[0].type : 'Credentials';
+            }
+
+            await user.save();
+
+            return res.status(200).json({
+                message: 'AuthPin removed successfully',
+                authMethods: user.authMethods.map(am => am.type),
+                preferredAuthMethod: user.preferredAuthMethod
+            });
+
+        } catch (err) {
+            console.error('Remove AuthPin error:', err);
+            return res.status(500).json({error: 'Failed to remove AuthPin'});
+        }
+    }
+
+    /**
+     * Get AuthPin status and info
+     */
+    static async getAuthPinStatus(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userData._id);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            const authPinStatus = {
+                hasAuthPin: !!(user.authPin && user.authPin.pin),
+                isEnabled: user.authPin?.isEnabled || false,
+                createdAt: user.authPin?.createdAt || null,
+                lastUsed: user.authPin?.lastUsed || null,
+                isLocked: user.authPin?.lockedUntil ? user.authPin.lockedUntil > new Date() : false,
+                lockExpiresAt: user.authPin?.lockedUntil || null,
+                failedAttempts: user.authPin?.failedAttempts || 0
+            };
+
+            return res.status(200).json({
+                authPin: authPinStatus
+            });
+
+        } catch (err) {
+            console.error('Get AuthPin status error:', err);
+            return res.status(500).json({error: 'Failed to get AuthPin status'});
+        }
+    }
+
+    static async userDashBoardData(userObject) {
+        const {AAngBase} = await getModels();
+        const user = await AAngBase.findById(userObject._id);
+
+        if (!user) {
+            throw new Error('User not found');
+        }
+
+        return {
+            email: user.email,
+            name: user.fullName || null,
+            avatar: user.avatar || null,
+            role: user.role.toLowerCase(),
+            emailVerified: user.emailVerified || false,
+            authPin: user.authPin ? {
+                isEnabled: user.authPin.isEnabled || null,
+            } : null,
+        };
+    }
+
 }
 
 export default AuthController;

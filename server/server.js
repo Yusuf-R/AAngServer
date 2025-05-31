@@ -43,6 +43,9 @@ const port = process.env.EXPRESS_PORT;
             console.error('Database connection failed!');
             process.exit(1);
         }
+        // Or even better: use getModels()
+        const getModels = await import('./models/AAng/AAngLogistics.js').then(m => m.default);
+        await getModels();
         app.listen(port, () => {
             console.log(`Server is listening on http://localhost:${port}`);
         });

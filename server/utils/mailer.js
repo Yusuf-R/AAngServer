@@ -27,7 +27,7 @@ class MailClient {
                 to: email,
                 subject: 'Password Reset Token',
                 html: `
-                    <h1>Welcome to AAngLogistics Service</h1>
+                    <h1>AAngLogistics Service</h1>
                     <p>To reset your password, please use the following token:</p>
                     <h3>${token}</h3>
                     <p>This token is valid for 5 minutes. Do not share it with anyone.</p>
@@ -58,6 +58,29 @@ class MailClient {
                     <p>If this request was not created by you, please ignore this email.</p>
                     <p>Best regards,<br/>AAngLogistics Support</p>
                 `
+            });
+        } catch (error) {
+            console.error('Error sending password reset email:', error);
+            throw new Error('Failed to send email');
+        }
+    }
+
+    // Static method to send the reset token
+    static async authResetToken(email, token) {
+        const transporter = this.getTransporter(); // Call getTransporter to initialize transporter
+        try {
+            await transporter.sendMail({
+                from: 'isola.remilekun@gmail.com',
+                to: email,
+                subject: 'PIN Reset/Update Token',
+                html: `
+                    <h1>AAngLogistics Service</h1>
+                    <p>To reset/update your PIN, please use the following token:</p>
+                    <h3>${token}</h3>
+                    <p>This token is valid for 5 minutes. Do not share it with anyone.</p>
+                    <p>If you did not request this token, please ignore this email.</p>
+                    <p>Best regards,<br/>AAngLogistics Support</p>
+                `,
             });
         } catch (error) {
             console.error('Error sending password reset email:', error);
