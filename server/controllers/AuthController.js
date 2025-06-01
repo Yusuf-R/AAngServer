@@ -10,6 +10,9 @@ import nodemailer from 'nodemailer';
 import {UAParser} from 'ua-parser-js';
 import MailClient from '../utils/mailer';
 import {logInSchema, resetPasswordSchema, signUpSchema, validateSchema} from "../validators/validateAuth";
+console.log({
+    RefreshToken
+})
 
 // Environment variables
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -208,13 +211,35 @@ class AuthController {
                         });
                     }
 
-                    // Return account exists response - user should login with credentials first
-                    return res.status(409).json({
-                        error: 'An account with this email already exists',
-                        accountExists: true,
-                        availableAuthMethods: user.authMethods.map(am => am.type),
-                        action: 'login_and_link'
+                    // 🔥 NEW LOGIC: Auto-link Google account to existing credentials-based account
+                    // Since email matches and Google ID is not used elsewhere, we can safely link them
+
+                    // Add Google authentication method to existing user
+                    user.authMethods.push({
+                        type: 'Google',
+                        providerId: googleId,
+                        verified: true,
+                        lastUsed: new Date()
                     });
+
+                    // Update user profile with Google info if not already set
+                    if (!user.fullName && name) {
+                        user.fullName = name;
+                    }
+                    if (!user.avatar && picture) {
+                        user.avatar = picture;
+                    }
+
+                    // Set Google as preferred method for this login
+                    user.preferredAuthMethod = 'Google';
+
+                    // Mark email as verified (since Google emails are verified)
+                    user.emailVerified = true;
+
+                    // Save the updated user
+                    await user.save();
+
+                    console.log(`Google account successfully linked to existing user: ${email}`);
                 }
             } else {
                 // New user - create account with Google auth
@@ -971,13 +996,11 @@ class AuthController {
      */
     static async logIn(req, res) {
         console.log('trying to login');
-        const {email, password, role} = req.body;
+        const {email, password,} = req.body;
 
-        if (!email || !password || !role) {
+        if (!email || !password) {
             return res.status(400).json({error: 'Email and password are required'});
         }
-
-        req.body.role = role.charAt(0).toUpperCase() + role.slice(1);
 
         const validation = await validateSchema(logInSchema, req.body);
 
@@ -994,11 +1017,6 @@ class AuthController {
 
             if (!user) {
                 console.log('User not found')
-                return res.status(401).json({error: 'Invalid email or password'});
-            }
-
-            // Check if role matches
-            if (user.role.toLowerCase() !== role.toLowerCase()) {
                 return res.status(401).json({error: 'Invalid email or password'});
             }
 
@@ -1161,8 +1179,8 @@ class AuthController {
             }
             case 'Password': {
                 const user = await AAngBase.findOne({
-                    passwordResetToken: token,
-                    passwordResetExpiry: {$gt: Date.now()},
+                    resetPasswordToken: token,
+                    resetPasswordExpiry: {$gt: Date.now()},
                 });
                 if (!user) throw new Error('Invalid or expired password reset token');
                 return user;
@@ -1223,17 +1241,44 @@ class AuthController {
     /**
      * Generated random OTP code of alphanumeric characters of length 6
      */
-    static generateVerificationToken({length = 6, numericOnly = false} = {}) {
-        const alphaNumChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-        const numericChars = '0123456789';
-        const chars = numericOnly ? numericChars : alphaNumChars;
+    /**
+     * Generates a strong uppercase alphanumeric OTP.
+     * Always includes at least 2 letters and 2 digits in a single pass.
+     */
+    static generateVerificationToken({ length = 6, numericOnly = false } = {}) {
+        const digits = '0123456789';
+        const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
-        let token = '';
-        for (let i = 0; i < length; i++) {
-            token += chars[Math.floor(Math.random() * chars.length)];
+        if (numericOnly) {
+            return Array.from({ length }, () => digits[Math.floor(Math.random() * digits.length)]).join('');
         }
-        return token;
+
+        if (length < 4) {
+            throw new Error('Length must be at least 4 to satisfy 2 letters and 2 digits.');
+        }
+
+        // 2 letters
+        const tokenParts = [
+            ...Array.from({ length: 2 }, () => letters[Math.floor(Math.random() * letters.length)]),
+            ...Array.from({ length: 2 }, () => digits[Math.floor(Math.random() * digits.length)])
+        ];
+
+        // Fill remaining with mixed letters/digits
+        const mix = letters + digits;
+        const remainingLength = length - tokenParts.length;
+        for (let i = 0; i < remainingLength; i++) {
+            tokenParts.push(mix[Math.floor(Math.random() * mix.length)]);
+        }
+
+        // Shuffle the final array
+        for (let i = tokenParts.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [tokenParts[i], tokenParts[j]] = [tokenParts[j], tokenParts[i]];
+        }
+
+        return tokenParts.join('');
     }
+
 
     /**
      * Request password reset
@@ -1262,11 +1307,11 @@ class AuthController {
             }
 
             // Generate reset token
-            const resetToken = AuthController.generateVerificationToken({numericOnly: true});
+            const resetToken = AuthController.generateVerificationToken({length: 5, numericOnly: false});
             const resetTokenExpiry = Date.now() + 3600000; // 1 hour
 
-            user.passwordResetToken = resetToken;
-            user.passwordResetExpiry = resetTokenExpiry;
+            user.resetPasswordToken = resetToken;
+            user.resetPasswordExpiry = resetTokenExpiry;
             await user.save();
 
             // Send reset token to email
@@ -1283,26 +1328,47 @@ class AuthController {
      * Reset password with token
      */
     static async resetPassword(req, res) {
+        const {
+            email,
+            token,
+            newPassword,
+            confirmPassword,
+            reqType,
+        } = req.body;
 
-        const {token, newPassword} = req.body;
-
-        if (!token || !newPassword) {
-            return res.status(400).json({error: 'Token and new password are required'});
+        if (!token || !newPassword || !email || !confirmPassword || !reqType) {
+            return res.status(400).json({error: 'Invalid credentials'});
+        }
+        if (newPassword !== confirmPassword) {
+            return res.status(400).json({error: 'New password and confirm password do not match'});
+        }
+        // ensure token is 5 character wide letters or number + letters
+        if (!/^[A-Za-z0-9]{5}$/.test(token)) {
+            return res.status(400).json({error: 'Invalid token format'});
         }
 
         try {
             await resetPasswordSchema.validate(req.body);
+            // no api precheck cos its not an authenticated request
 
             const user = await AuthController.verifyToken('Password', token);
+            if (!user) {
+                res.status(400).json({error: 'Invalid or expired password reset token'});
+            }
 
-            const {AAngBase, RefreshToken} = await getModels();
+            const {AAngBase} = await getModels();
+
+            // ensure the email is from the user
+            if (user.email.toLowerCase() !== email.toLowerCase()) {
+                return res.status(400).json({error: 'Forbidden request'});
+            }
 
             // Hash and update the new password
             user.password = await AuthController.hashPassword(newPassword);
 
             // Clear reset token fields
-            user.passwordResetToken = undefined;
-            user.passwordResetExpiry = undefined;
+            user.resetPasswordToken = undefined;
+            user.resetPasswordExpiry = undefined;
 
             // Update password change timestamp in Credentials
             const credentialsIndex = user.authMethods.findIndex(m => m.type === 'Credentials');
@@ -1380,9 +1446,7 @@ class AuthController {
             if (credentialsIndex !== -1) {
                 user.authMethods[credentialsIndex].lastUpdated = new Date();
             }
-            console.log('Got here')
             await user.save();
-            console.log('Data saved')
 
             // Keep current session but invalidate all other sessions
             const authHeader = req.headers.authorization;
@@ -1393,7 +1457,6 @@ class AuthController {
                 userId: user._id,
                 token: {$ne: req.body.refreshToken} // Keep current refresh token if provided
             });
-            console.log('See ya');
 
             // Remove all session tokens except current one
             await AAngBase.updateOne(
@@ -2206,6 +2269,52 @@ class AuthController {
         }
     }
 
+    static async acceptTCs(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const { acceptedTcs } = req.body;
+        if (typeof acceptedTcs !== 'boolean') {
+            return res.status(400).json({error: 'acceptedTcs must be a boolean'});
+        }
+        if (!acceptedTcs) {
+            return res.status(400).json({error: 'You must accept the terms and conditions'});
+        }
+        const {userData} = preCheckResult;
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userData._id);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            // set tcs to true
+            user.tcs.isAccepted = true
+            user.tcs.acceptedAt = new Date();
+
+            await user.save();
+
+            // get userDashboard data
+            const userDashboard = await AuthController.userDashBoardData(user)
+
+            return res.status(201).json({
+                message: 'Terms accepted',
+                user: userDashboard,
+            });
+        } catch (err) {
+            console.error('Change password error:', err);
+            return res.status(500).json({error: 'Failed to change password'});
+        }
+    }
+
     static async userDashBoardData(userObject) {
         const {AAngBase} = await getModels();
         const user = await AAngBase.findById(userObject._id);
@@ -2213,6 +2322,12 @@ class AuthController {
         if (!user) {
             throw new Error('User not found');
         }
+
+        // Check if user has credentials authentication method
+        const hasCredentialsAuth = user.authMethods.some(method => method.type === 'Credentials');
+
+        // Additional check: user has password field populated (using virtual)
+        const hasStoredPassword = user.hasPassword; // This uses your virtual field
 
         return {
             email: user.email,
@@ -2223,7 +2338,49 @@ class AuthController {
             authPin: user.authPin ? {
                 isEnabled: user.authPin.isEnabled || null,
             } : null,
+            passwordChangeAllowed: hasCredentialsAuth && hasStoredPassword,
+            authMethods: user.authMethods.map(method => ({
+                type: method.type,
+                verified: method.verified,
+                lastUsed: method.lastUsed
+            })),
+            primaryProvider: user.provider || user.preferredAuthMethod,
+            tcs: {
+                isAccepted: user.tcs?.isAccepted || false,
+            }
         };
+    }
+
+
+    static async getDashboardData(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userData._id);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+            // get userDashboard data
+            const userDashboard = await AuthController.userDashBoardData(user)
+            return res.status(200).json({
+                user: userDashboard,
+            });
+        } catch (err) {
+            console.error('Change password error:', err);
+            return res.status(500).json({error: 'Failed to change password'});
+        }
+
     }
 
 }

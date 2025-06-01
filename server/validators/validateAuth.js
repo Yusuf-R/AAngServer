@@ -9,6 +9,11 @@ export const resetPasswordSchema = Yup.object().shape({
         .matches(/[a-z]/, 'Must contain at least one lowercase letter')
         .matches(/[0-9]/, 'Must contain at least one number')
         .matches(/[!@#$%^&*(),.?":{}|<>]/, 'Must contain at least one special character'),
+    confirmPassword:Yup.string()
+        .oneOf([Yup.ref('newPassword'), null], 'Passwords must match')
+        .required('Confirm Password is required'),
+    email: Yup.string().email().required(),
+    reqType: Yup.string().oneOf(['resetPassword']).required()
 });
 
 export const signUpSchema = Yup.object().shape({
@@ -26,7 +31,6 @@ export const signUpSchema = Yup.object().shape({
 export const logInSchema = Yup.object().shape({
     email: Yup.string().email().required(),
     password: Yup.string().required(),
-    role: Yup.string().oneOf(['Client', 'Driver', 'Admin']).required()
 });
 
 export const validateSchema = async (schema, data) => {

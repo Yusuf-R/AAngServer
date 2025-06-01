@@ -7,7 +7,6 @@ const REFRESH_TOKEN_EXP = 60 * 60 * 24 * 30;
 
 const refreshTokenSchema = new mongoose.Schema(
     {
-        // Safe to use ref now that TTL is removed
         userId: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'Base',

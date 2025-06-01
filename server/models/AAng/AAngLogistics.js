@@ -64,6 +64,14 @@ const AAngSchema = new Schema({
         failedAttempts: { type: Number, default: 0 },
         lockedUntil: { type: Date }
     },
+    // terms and conditions -- tcs
+    tcs: {
+        isAccepted: {
+            type: Boolean, default: false
+        },
+        acceptedAt: {type: Date, default: Date.now},
+        version: {type: String, default: '1.0'},
+    },
 
     pinVerificationToken: {
         token: String,
@@ -116,6 +124,7 @@ const AAngSchema = new Schema({
 
     authPinResetToken: String,
     authPinResetExpiry: Date
+
 }, baseOptions);
 
 AAngSchema.virtual('hasPassword').get(function() {

@@ -19,7 +19,7 @@ authRouter.post('/signup', AuthController.signUp);
 authRouter.post('/login', AuthController.logIn);
 authRouter.post('/get-token', AuthController.getToken);
 authRouter.post('/verify-email', AuthController.verifyEmail);
-authRouter.post('/forgot-password-token', AuthController.forgotPasswordToken);
+authRouter.post('/request-password-reset', AuthController.forgotPasswordToken);
 authRouter.post('/reset-password', AuthController.resetPassword);
 authRouter.post('/update-password', AuthController.updatePassword);
 authRouter.post('/set-pin', AuthController.setAuthPin);
@@ -30,5 +30,7 @@ authRouter.post('/verify-pin', AuthController.verifyAuthPin);
 authRouter.patch('/toggle-pin', AuthController.toggleAuthPin);
 authRouter.delete('/remove-pin', AuthController.removeAuthPin);
 authRouter.get('/status-pim', AuthController.getAuthPinStatus);
+authRouter.post('/tcs', AuthController.acceptTCs);
+authRouter.get('/dashboard', AuthController.getDashboardData);
 
 module.exports = authRouter;
