@@ -3,6 +3,7 @@ import ms from 'ms';
 import jwt from "jsonwebtoken";
 import getModels from "../models/AAng/AAngLogistics";
 import RefreshToken from "../models/RefreshToken";
+import NotificationService from "../service/NotificationService";
 import bcrypt from 'bcrypt';
 import {OAuth2Client} from 'google-auth-library';
 import redisClient from '../utils/redis';
@@ -10,9 +11,7 @@ import nodemailer from 'nodemailer';
 import {UAParser} from 'ua-parser-js';
 import MailClient from '../utils/mailer';
 import {logInSchema, resetPasswordSchema, signUpSchema, validateSchema} from "../validators/validateAuth";
-console.log({
-    RefreshToken
-})
+import { cloudinary } from '../utils/cloudinary'
 
 // Environment variables
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -21,6 +20,7 @@ const refreshSecret = process.env.JWT_REFRESH_SECRET;
 const accessExpires = process.env.JWT_ACCESS_EXPIRES_IN;
 const refreshExpires = process.env.JWT_REFRESH_EXPIRES_IN;
 const accessExpiresMs = ms(accessExpires);
+const api_key = process.env.CLOUDINARY_API_KEY;
 
 // Email configuration for password reset and verification
 const transporter = nodemailer.createTransport({
@@ -766,6 +766,34 @@ class AuthController {
     }
 
     /**
+     * Verify access token
+     */
+    static async verifySocketAccessToken(token) {
+        try {
+            const decoded = jwt.verify(token, accessSecret);
+            if (!decoded || !decoded.id) {
+                throw new Error('Invalid access token payload');
+            }
+
+            const { AAngBase } = await getModels();
+            const user = await AAngBase.findById(decoded.id);
+
+            if (!user) {
+                throw new Error('User not found');
+            }
+
+            if (['inactive', 'suspended'].includes(user.status)) {
+                throw new Error('User is not allowed to connect');
+            }
+
+            return user;
+        } catch (err) {
+            console.error('Socket token verification failed:', err.message);
+            throw err;
+        }
+    }
+
+    /**
      * Verify refresh token
      */
     static verifyRefreshToken(token, expiryFlag = false) {
@@ -1279,7 +1307,6 @@ class AuthController {
         return tokenParts.join('');
     }
 
-
     /**
      * Request password reset
      */
@@ -1463,6 +1490,15 @@ class AuthController {
                 {_id: user._id},
                 {$pull: {sessionTokens: {token: {$ne: currentToken}}}}
             );
+
+            // ✅ Trigger notification
+            await NotificationService.createNotification({
+                userId: user._id,
+                type: 'security.password_changed',
+
+            });
+            console.log('✅ Notification created for: Password Change');
+
             return res.status(201).json({message: 'Password changed successfully'});
         } catch (err) {
             console.error('Change password error:', err);
@@ -1675,9 +1711,16 @@ class AuthController {
 
             await user.save();
 
+
+            // ✅ Trigger notification
+            await NotificationService.createNotification({
+                userId: user._id,
+                type: 'security.pin_set',
+            });
+            console.log('✅ Notification created for: Auth PIN Set');
+
             // get userDashboard data
             const userDashboard = await AuthController.userDashBoardData(user)
-
 
             return res.status(201).json({
                 message: 'AuthPin set successfully',
@@ -1774,6 +1817,7 @@ class AuthController {
                 }
 
                 await user.save();
+
                 return res.status(401).json({
                     error: 'Current PIN is incorrect',
                     attemptsRemaining: 5 - user.authPin.failedAttempts
@@ -1804,6 +1848,13 @@ class AuthController {
             user.authPinResetExpiry = undefined;
 
             await user.save();
+
+            // ✅ Trigger notification
+            await NotificationService.createNotification({
+                userId: user._id,
+                type: 'security.pin_updated',
+            });
+            console.log('✅ Notification created for: Auth PIN Updated');
 
             return res.status(201).json({message: 'AuthPin updated successfully'});
 
@@ -1896,6 +1947,13 @@ class AuthController {
             }
 
             await user.save();
+
+            // ✅ Trigger notification
+            await NotificationService.createNotification({
+                userId: user._id,
+                type: 'security.pin_reset',
+            });
+            console.log('✅ Notification created for: Auth PIN Reset');
 
             return res.status(201).json({message: 'AuthPin reset successfully'});
 
@@ -2322,23 +2380,38 @@ class AuthController {
         if (!user) {
             throw new Error('User not found');
         }
+        const verificationChecks = {
+            Client: () => user.emailVerified === true && user.nin?.verified === true,
 
-        // Check if user has credentials authentication method
-        const hasCredentialsAuth = user.authMethods.some(method => method.type === 'Credentials');
+            Driver: () => {
+                return user.emailVerified === true && user.nin?.verified === true;
+                // 🔜 Later extend with license, plate, etc.
+                // && user.license?.verified === true
+            },
 
-        // Additional check: user has password field populated (using virtual)
-        const hasStoredPassword = user.hasPassword; // This uses your virtual field
+            Admin: () => true, // optional: admin might not need checks
+        };
+
+        // Step 2: Determine verification status intelligently
+        const isFullyVerified = verificationChecks[user.role]?.() || false;
 
         return {
+            id: user._id.toString(),
             email: user.email,
             name: user.fullName || null,
             avatar: user.avatar || null,
             role: user.role.toLowerCase(),
             emailVerified: user.emailVerified || false,
+            address: user.address || null,
+            state: user.state || null,
+            lga: user.lga || null,
+            dob: user.dob ? new Date(user.dob).toISOString() : null,
+            fullName: user.fullName || null,
+            gender : user.gender || null,
+            phoneNumber: user.phoneNumber || null,
             authPin: user.authPin ? {
                 isEnabled: user.authPin.isEnabled || null,
             } : null,
-            passwordChangeAllowed: hasCredentialsAuth && hasStoredPassword,
             authMethods: user.authMethods.map(method => ({
                 type: method.type,
                 verified: method.verified,
@@ -2347,10 +2420,11 @@ class AuthController {
             primaryProvider: user.provider || user.preferredAuthMethod,
             tcs: {
                 isAccepted: user.tcs?.isAccepted || false,
-            }
+            },
+            ninVerified: user.nin?.verified || false,
+            isFullyVerified
         };
     }
-
 
     static async getDashboardData(req, res) {
         // Perform API pre-check
@@ -2377,12 +2451,52 @@ class AuthController {
                 user: userDashboard,
             });
         } catch (err) {
-            console.error('Change password error:', err);
+            console.log('Change password error:', err);
             return res.status(500).json({error: 'Failed to change password'});
         }
 
     }
 
+    // Cloudinary
+    static async getSignedUrl(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+
+        try {
+            const userId = userData._id.toString();
+            const timestamp = Math.floor(Date.now() / 1000);
+            const publicId = `AAngLogistics/Avatar/${userId}/profile`;
+
+            const signature = cloudinary.utils.api_sign_request(
+                {
+                    timestamp,
+                    public_id: publicId,
+                },
+                process.env.CLOUDINARY_API_SECRET
+            );
+
+            console.log('Signature sent');
+
+            res.status(200).json({
+                timestamp,
+                signature,
+                public_id : publicId,
+                api_key
+            });
+        } catch (err) {
+            console.error('Signature error:', err.message);
+            res.status(500).json({ error: 'Could not generate signature' });
+        }
+    }
 }
 
 export default AuthController;

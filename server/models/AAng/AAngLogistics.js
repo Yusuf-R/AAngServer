@@ -55,7 +55,9 @@ const AAngSchema = new Schema({
     phoneNumber: String,
     dob: String,
     gender: { type: String, enum: ["Male", "Female"] },
-
+    address: String,
+    state: String,
+    lga: String,
     authPin: {
         pin: { type: String },
         isEnabled: { type: Boolean, default: false },
@@ -105,6 +107,31 @@ const AAngSchema = new Schema({
         type: String,
         enum: ['Google', 'Apple', 'Credentials', 'AuthPin'],
         default: 'Credentials'
+    },
+
+    // NIN particulars
+    nin: {
+        number: {
+            type: String,
+            unique: true,
+            sparse: true
+        },
+        verified: {
+            type: Boolean,
+            default: false
+        },
+        verification: {
+            date: Date,
+            method: {
+                type: String,
+                enum: ['api', 'manual', null],
+                default: null
+            },
+            metadata: {
+                type: Object,
+                default: {}
+            }
+        }
     },
 
     sessionTokens: [{

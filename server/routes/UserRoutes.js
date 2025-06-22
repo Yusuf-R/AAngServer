@@ -14,7 +14,7 @@ const userRouter = express.Router();
 userRouter.use(cors(corsOptions));
 userRouter.options('*', cors(corsOptions));
 
-userRouter.post('/login', userController.login);
-userRouter.post('/logout', userController.logout);
+userRouter.put('/update-profile', userController.updateProfile);
+userRouter.put('/update-avatar', userController.updateAvatar);
 
 module.exports = userRouter;

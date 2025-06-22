@@ -5,6 +5,7 @@ const cors = require('cors');
 
 const authRouter = require('./AuthRoutes');
 const userRouter = require('./UserRoutes');
+const notificationRouter = require('./NotificationRoutes');
 
 const securityConfig = new SecurityConfig()
 const { corsOptions } = securityConfig;
@@ -19,5 +20,6 @@ router.options('*', cors(corsOptions));
 // //  All routes
 router.use('/api/v1/auth', authRouter);
 router.use('/api/v1/user', userRouter);
+router.use('/api/v1/notification', notificationRouter);
 
 module.exports = router;
