@@ -1,5 +1,5 @@
 import AuthController from "./AuthController";
-import NotificationService from "../service/NotificationService";
+import NotificationService from "../services/NotificationService";
 
 class NotificationController {
 

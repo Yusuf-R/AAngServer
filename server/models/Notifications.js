@@ -47,7 +47,9 @@ const NotificationSchema = new mongoose.Schema({
 
             // SECURITY category
             'security.password_changed',
-            'security.pin_changed',
+            'security.pin_set',
+            'security.pin_reset',
+            'security.pin_update',
             'security.login_attempt',
             'security.device_login',
             'security.suspicious_activity',

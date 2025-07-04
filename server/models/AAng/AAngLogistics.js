@@ -193,9 +193,34 @@ const AddressSchema = new Schema({
     description: String,
 }, { _id: true });
 
+const LocationSchema = new Schema({
+    address: { type: String, required: true },
+    coordinates: {
+        lat: { type: Number, required: true },
+        lng: { type: Number, required: true }
+    },
+    landmark: String,
+    contactPerson: {
+        name: String,
+        phone: String,
+        alternatePhone: String
+    },
+    extraInformation: String,
+    locationType: {
+        type: String,
+        enum: ['residential', 'commercial', 'office', 'mall', 'hospital', 'school', 'other'],
+        default: 'residential'
+    },
+    building: {
+        name: String,
+        floor: String,
+        unit: String
+    }
+}, { _id: true });
+
 const ClientSchema = new Schema({
-    addresses: { type: [AddressSchema], default: [] },
-    rideHistory: { type: Array, default: [] },
+    savedLocations: { type: [LocationSchema], default: [] },
+    orderHistory: { type: Array, default: [] },
 });
 
 const DriverSchema = new Schema({

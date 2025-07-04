@@ -3,7 +3,7 @@ import ms from 'ms';
 import jwt from "jsonwebtoken";
 import getModels from "../models/AAng/AAngLogistics";
 import RefreshToken from "../models/RefreshToken";
-import NotificationService from "../service/NotificationService";
+import NotificationService from "../services/NotificationService";
 import bcrypt from 'bcrypt';
 import {OAuth2Client} from 'google-auth-library';
 import redisClient from '../utils/redis';
@@ -2403,6 +2403,7 @@ class AuthController {
             role: user.role.toLowerCase(),
             emailVerified: user.emailVerified || false,
             address: user.address || null,
+            savedLocations: user.savedLocations || [],
             state: user.state || null,
             lga: user.lga || null,
             dob: user.dob ? new Date(user.dob).toISOString() : null,

@@ -1,4 +1,4 @@
-import NotificationService from '../service/NotificationService';
+import NotificationService from '../services/NotificationService';
 import Notification from '../models/Notifications';
 
 class NotificationSocket {

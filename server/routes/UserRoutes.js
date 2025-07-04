@@ -16,5 +16,8 @@ userRouter.options('*', cors(corsOptions));
 
 userRouter.put('/update-profile', userController.updateProfile);
 userRouter.put('/update-avatar', userController.updateAvatar);
+userRouter.post('/location/create', userController.createLocation);
+userRouter.put('/location/update', userController.updateLocation);
+userRouter.delete('/location/delete', userController.deleteLocation);
 
 module.exports = userRouter;
