@@ -136,6 +136,8 @@ const localIP = getLocalIP();
         }
 
         const getModels = await import('./models/AAng/AAngLogistics.js').then(m => m.default);
+        const getOrderModels = await import('./models/Order').then(m => m.default);
+        await getOrderModels();
         await getModels();
 
         server.listen(port, () => {

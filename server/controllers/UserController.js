@@ -1,7 +1,6 @@
 import AuthController from "./AuthController";
 import {profileUpdateSchema, validateSchema, avatarSchema} from "../validators/validateAuth";
 import getModels from "../models/AAng/AAngLogistics";
-import RefreshToken from "../models/RefreshToken";
 import locationSchema from "../validators/locationValidator";
 import mongoose from "mongoose";
 

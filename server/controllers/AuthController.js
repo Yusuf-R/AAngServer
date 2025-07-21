@@ -2,6 +2,7 @@ import dbClient from "../database/mongoDB";
 import ms from 'ms';
 import jwt from "jsonwebtoken";
 import getModels from "../models/AAng/AAngLogistics";
+
 import RefreshToken from "../models/RefreshToken";
 import NotificationService from "../services/NotificationService";
 import bcrypt from 'bcrypt';
@@ -12,6 +13,8 @@ import {UAParser} from 'ua-parser-js';
 import MailClient from '../utils/mailer';
 import {logInSchema, resetPasswordSchema, signUpSchema, validateSchema} from "../validators/validateAuth";
 import { cloudinary } from '../utils/cloudinary'
+import getOrderModels from "../models/Order";
+import order from "../models/Order";
 
 // Environment variables
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -2373,13 +2376,23 @@ class AuthController {
         }
     }
 
-    static async userDashBoardData(userObject) {
+    static async userDashBoardData(userObject, flag=null) {
+        let orderData;
         const {AAngBase} = await getModels();
+        const {Order } = await getOrderModels();
         const user = await AAngBase.findById(userObject._id);
+
+        if (flag) {
+            orderData = await Order.findById(userObject._id);
+            if (!orderData) {
+                orderData = null;
+            }
+        }
 
         if (!user) {
             throw new Error('User not found');
         }
+
         const verificationChecks = {
             Client: () => user.emailVerified === true && user.nin?.verified === true,
 
@@ -2423,7 +2436,8 @@ class AuthController {
                 isAccepted: user.tcs?.isAccepted || false,
             },
             ninVerified: user.nin?.verified || false,
-            isFullyVerified
+            isFullyVerified,
+            orderData,
         };
     }
 

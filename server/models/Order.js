@@ -12,10 +12,31 @@ const connectDB = async () => {
 
 // Enhanced Location Schema for precise tracking
 const LocationSchema = new Schema({
-    address: { type: String, required: true },
+    address: {
+        type: String,
+        required: function() {
+            return this.parent().status !== 'draft';
+        }
+    },
     coordinates: {
-        lat: { type: Number, required: true, index: '2dsphere' },
-        lng: { type: Number, required: true, index: '2dsphere' }
+        type: {
+            type: String,
+            enum: ['Point'],
+            default: 'Point',
+            required: true
+        },
+        coordinates: {
+            type: [Number], // [longitude, latitude]
+            required: true,
+            validate: {
+                validator: function(v) {
+                    return v.length === 2 &&
+                        v[0] >= -180 && v[0] <= 180 &&
+                        v[1] >= -90 && v[1] <= 90;
+                },
+                message: props => `${props.value} is not a valid coordinate pair`
+            }
+        }
     },
     landmark: String,
     contactPerson: {
@@ -42,9 +63,10 @@ const PackageSchema = new Schema({
     category: {
         type: String,
         enum: ['document', 'parcel', 'food', 'fragile', 'electronics', 'clothing', 'medicine', 'furniture', 'jewelry', 'gifts', 'books', 'others'],
-        required: true
+        required: function() {
+            return this.parent().status !== 'draft';
+        }
     },
-    subcategory: String, // More specific categorization
     dimensions: {
         length: Number,
         width: Number,
@@ -53,7 +75,7 @@ const PackageSchema = new Schema({
     },
     weight: {
         value: Number,
-        unit: { type: String, enum: ['kg', 'g', 'lbs'], default: 'kg' }
+        unit: { type: String, enum: ['kg', 'g'], default: 'kg' }
     },
     value: Number, // Declared value for insurance
     isFragile: { type: Boolean, default: false },
@@ -336,7 +358,26 @@ const OrderSchema = new Schema({
         sourceIP: String,
         userAgent: String,
         referenceNumber: String, // External system reference
-        notes: String
+        notes: String,
+
+        // Add draft progress tracking
+        draftProgress: {
+            step: { type: Number, default: 1 }, // Current step (1-7)
+            completedSteps: [{ type: Number }], // Array of completed step numbers
+            lastUpdated: { type: Date, default: Date.now },
+            completedAt: Date, // When all steps were completed
+
+            // Track form field completion for better UX
+            fieldCompletion: {
+                pickup: { type: Boolean, default: false },
+                dropoff: { type: Boolean, default: false },
+                package: { type: Boolean, default: false },
+                scheduling: { type: Boolean, default: false },
+                vehicle: { type: Boolean, default: false },
+                payment: { type: Boolean, default: false },
+                confirmation: { type: Boolean, default: false }
+            }
+        }
     },
 
     // Cancellation
@@ -488,7 +529,7 @@ OrderSchema.statics.getOrderHistory = async function(clientId, limit = 10) {
 
 // Order Assignment Schema - Separate collection for managing driver assignments
 const OrderAssignmentSchema = new Schema({
-    orderId: { type: Schema.Types.ObjectId, ref: 'Order', required: true, index: true },
+    orderId: { type: Schema.Types.ObjectId, ref: 'Order', required: true },
     availableDrivers: [{
         driverId: { type: Schema.Types.ObjectId, ref: 'Base', required: true },
         distance: Number,
