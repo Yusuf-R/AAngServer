@@ -465,7 +465,7 @@ OrderSchema.statics.findNearbyOrders = function(lat, lng, maxDistance = 10000) {
 };
 
 OrderSchema.statics.getOrderStats = async function(clientId) {
-    const matchStage = clientId ? { clientId: mongoose.Types.ObjectId(clientId) } : {};
+    const matchStage = clientId ? { clientId: new mongoose.Types.ObjectId(clientId) } : {};
 
     const pipeline = [
         { $match: matchStage },

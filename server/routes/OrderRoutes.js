@@ -16,5 +16,8 @@ orderRouter.options('*', cors(corsOptions));
 
 // Order Routes
 orderRouter.post('/instantiate', orderController.instantObject);
+orderRouter.post('/create', orderController.createOrder);
+orderRouter.get('/all', orderController.getAllClientOrders);
+orderRouter.delete('/delete', orderController.deleteOrder);
 
 module.exports = orderRouter;

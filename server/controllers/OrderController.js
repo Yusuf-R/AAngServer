@@ -1,6 +1,7 @@
 import AuthController from "./AuthController";
 import getOrderModels, {generateOrderRef} from "../models/Order";
 import getModels from "../models/AAng/AAngLogistics";
+import mongoose from "mongoose";
 
 class OrderController {
 
@@ -107,9 +108,60 @@ class OrderController {
             // Inject the just-created order directly
             dashboardData.orderData = draftOrder.toObject();
 
+            // Fetch all orders for the client
+            const orders = await Order.find({ clientId }).populate('clientId').sort({ createdAt: -1 });
+
+            // Compute statistics via aggregation
+            const results = await Order.aggregate([
+                { $match: { clientId: new mongoose.Types.ObjectId(clientId) } },
+                {
+                    $group: {
+                        _id: null,
+                        total: { $sum: 1 },
+                        completed: {
+                            $sum: { $cond: [{ $eq: ["$status", "delivered"] }, 1, 0] }
+                        },
+                        active: {
+                            $sum: {
+                                $cond: [
+                                    {
+                                        $in: ["$status", [
+                                            "draft", "pending", "broadcast", "assigned", "confirmed",
+                                            "en_route_pickup", "arrived_pickup", "picked_up", "in_transit", "arrived_dropoff"
+                                        ]]
+                                    },
+                                    1,
+                                    0
+                                ]
+                            }
+                        },
+                        failed: {
+                            $sum: {
+                                $cond: [
+                                    { $in: ["$status", ["cancelled", "failed", "returned"]] },
+                                    1,
+                                    0
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]);
+
+            const statistics = results[0] || {
+                total: 0,
+                completed: 0,
+                active: 0,
+                failed: 0
+            };
+
             return res.status(201).json({
                 message: "Draft order created successfully",
-                user: dashboardData
+                user: dashboardData,
+                order: {
+                    orders: orders.map(order => order.toObject()),
+                    statistics
+                }
             });
 
         } catch (err) {
@@ -118,6 +170,293 @@ class OrderController {
                 error: "Failed to create draft order"
             });
         }
+    }
+
+    static async createOrder(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const clientId = userData._id;
+
+        try {
+            const { Order } = await getOrderModels();
+            const orderData = req.body;
+
+            // Validate required fields
+            if (!orderData.pickup || !orderData.dropoff || !orderData.package) {
+                return res.status(400).json({ error: "Missing required order fields" });
+            }
+
+            // Create new order instance
+            const newOrder = new Order({
+                ...orderData,
+                clientId,
+                orderRef: generateOrderRef(),
+                status: 'draft',
+                deliveryToken: generateDeliveryToken(),
+                statusHistory: [{
+                    status: 'draft',
+                    timestamp: new Date(),
+                    updatedBy: {
+                        userId: clientId,
+                        role: 'client'
+                    },
+                    notes: 'Order created and saved as draft'
+                }]
+            });
+
+            await newOrder.save();
+
+            // get dashboard data
+            const dashboardData = await AuthController.userDashBoardData(userData);
+            if (!dashboardData) {
+                return res.status(404).json({error: "Dashboard data not found"});
+            }
+            // Inject the just-created order directly
+            dashboardData.orderData = newOrder.toObject();
+
+            // Fetch all orders for the client
+            const orders = await Order.find({ clientId }).populate('clientId').sort({ createdAt: -1 });
+
+            // Compute statistics via aggregation
+            const results = await Order.aggregate([
+                { $match: { clientId: new mongoose.Types.ObjectId(clientId) } },
+                {
+                    $group: {
+                        _id: null,
+                        total: { $sum: 1 },
+                        completed: {
+                            $sum: { $cond: [{ $eq: ["$status", "delivered"] }, 1, 0] }
+                        },
+                        active: {
+                            $sum: {
+                                $cond: [
+                                    {
+                                        $in: ["$status", [
+                                            "draft", "pending", "broadcast", "assigned", "confirmed",
+                                            "en_route_pickup", "arrived_pickup", "picked_up", "in_transit", "arrived_dropoff"
+                                        ]]
+                                    },
+                                    1,
+                                    0
+                                ]
+                            }
+                        },
+                        failed: {
+                            $sum: {
+                                $cond: [
+                                    { $in: ["$status", ["cancelled", "failed", "returned"]] },
+                                    1,
+                                    0
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]);
+
+            const statistics = results[0] || {
+                total: 0,
+                completed: 0,
+                active: 0,
+                failed: 0
+            };
+
+            return res.status(201).json({
+                message: "Order created successfully",
+                user: dashboardData,
+                order: {
+                    orders: orders.map(order => order.toObject()),
+                    statistics
+                }
+            });
+        } catch (err) {
+            console.error("Create order error:", err);
+            return res.status(500).json({
+                error: "Failed to create order"
+            });
+        }
+    }
+
+    static async getAllClientOrders(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const clientId = userData._id;
+
+        try {
+            const { Order } = await getOrderModels();
+            const orders = await Order.find({ clientId }).populate('clientId').sort({ createdAt: -1 });
+
+            // Compute statistics using aggregation
+            const results = await Order.aggregate([
+                { $match: { clientId: new mongoose.Types.ObjectId(clientId) } },
+                {
+                    $group: {
+                        _id: null,
+                        total: { $sum: 1 },
+                        completed: {
+                            $sum: { $cond: [{ $eq: ["$status", "delivered"] }, 1, 0] }
+                        },
+                        active: {
+                            $sum: {
+                                $cond: [
+                                    { $in: ["$status", [
+                                            "draft", "pending", "broadcast", "assigned", "confirmed",
+                                            "en_route_pickup", "arrived_pickup", "picked_up", "in_transit", "arrived_dropoff"
+                                        ]]},
+                                    1,
+                                    0
+                                ]
+                            }
+                        },
+                        failed: {
+                            $sum: {
+                                $cond: [
+                                    { $in: ["$status", ["cancelled", "failed", "returned"]] },
+                                    1,
+                                    0
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]);
+
+            const statistics = results[0] || {
+                total: 0,
+                completed: 0,
+                active: 0,
+                failed: 0
+            };
+
+            // Bundle everything under a single 'order' object
+            return res.status(200).json({
+                message: "Orders retrieved successfully",
+                order: {
+                    orders: orders.map(order => order.toObject()),
+                    statistics
+                }
+            });
+        } catch (err) {
+            console.error("Get all client orders error:", err);
+            return res.status(500).json({
+                error: "Failed to retrieve orders"
+            });
+        }
+    }
+
+    static async deleteOrder(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const clientId = userData._id;
+        const { orderId } = req.body;
+
+        try {
+            const { Order } = await getOrderModels();
+            const order = await Order.findOneAndDelete({ _id: orderId, clientId });
+
+            if (!order) {
+                return res.status(404).json({ error: "Order not found" });
+            }
+
+            // Get updated data after deletion
+            const { orders, statistics } = await OrderController.getClientOrdersWithStats(clientId);
+
+            return OrderController.successResponse(res, "Order deleted successfully", {
+                order: { orders, statistics }
+            });
+
+        } catch (err) {
+            console.error("Delete order error:", err);
+            return res.status(500).json({ error: "Failed to delete order" });
+        }
+    }
+
+    /**
+     * Common function to get orders and statistics for a client
+     */
+    static async getClientOrdersWithStats(clientId) {
+        const { Order } = await getOrderModels();
+
+        const orders = await Order.find({ clientId })
+            .populate('clientId')
+            .sort({ createdAt: -1 })
+            .lean();
+
+        const results = await Order.aggregate([
+            { $match: { clientId: new mongoose.Types.ObjectId(clientId) } },
+            {
+                $group: {
+                    _id: null,
+                    total: { $sum: 1 },
+                    completed: {
+                        $sum: { $cond: [{ $eq: ["$status", "delivered"] }, 1, 0] }
+                    },
+                    active: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $in: ["$status", [
+                                        "draft", "pending", "broadcast", "assigned", "confirmed",
+                                        "en_route_pickup", "arrived_pickup", "picked_up", "in_transit", "arrived_dropoff"
+                                    ]]
+                                },
+                                1,
+                                0
+                            ]
+                        }
+                    },
+                    failed: {
+                        $sum: {
+                            $cond: [
+                                { $in: ["$status", ["cancelled", "failed", "returned"]] },
+                                1,
+                                0
+                            ]
+                        }
+                    }
+                }
+            }
+        ]);
+
+        return {
+            orders,
+            statistics: results[0] || {
+                total: 0,
+                completed: 0,
+                active: 0,
+                failed: 0
+            }
+        };
+    }
+
+    /**
+     * Common success response format
+     */
+    static successResponse(res, message, data = {}) {
+        return res.status(200).json({ message, ...data });
     }
 }
 
