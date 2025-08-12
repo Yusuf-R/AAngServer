@@ -100,13 +100,7 @@ class OrderController {
 
             await draftOrder.save();
 
-            // get dashboard data
-            const dashboardData = await AuthController.userDashBoardData(userData);
-            if (!dashboardData) {
-                return res.status(404).json({error: "Dashboard data not found"});
-            }
-            // Inject the just-created order directly
-            dashboardData.orderData = draftOrder.toObject();
+            const orderData = draftOrder.toObject();
 
             // Fetch all orders for the client
             const orders = await Order.find({ clientId }).populate('clientId').sort({ createdAt: -1 });
@@ -157,10 +151,10 @@ class OrderController {
 
             return res.status(201).json({
                 message: "Draft order created successfully",
-                user: dashboardData,
                 order: {
                     orders: orders.map(order => order.toObject()),
-                    statistics
+                    statistics,
+                    orderData
                 }
             });
 
@@ -286,6 +280,7 @@ class OrderController {
     }
 
     static async getAllClientOrders(req, res) {
+        console.log('First time get');
         // Perform API pre-check
         const preCheckResult = await AuthController.apiPreCheck(req);
         if (!preCheckResult.success) {
@@ -358,6 +353,18 @@ class OrderController {
                 error: "Failed to retrieve orders"
             });
         }
+    }
+
+    static async saveDraft(req, res) {
+        console.log('To be implemented: Save draft order');
+    }
+
+    static async updateOrder(req, res) {
+        console.log('To be implemented: Update order details');
+    }
+
+    static async submitOrder(req, res) {
+        console.log('To be implemented: Submit order for processing');
     }
 
     static async deleteOrder(req, res) {

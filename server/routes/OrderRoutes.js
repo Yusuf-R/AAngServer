@@ -19,5 +19,7 @@ orderRouter.post('/instantiate', orderController.instantObject);
 orderRouter.post('/create', orderController.createOrder);
 orderRouter.get('/all', orderController.getAllClientOrders);
 orderRouter.delete('/delete', orderController.deleteOrder);
+orderRouter.patch('/save', orderController.saveDraft);
+orderRouter.patch('/submit', orderController.submitOrder);
 
 module.exports = orderRouter;

@@ -120,11 +120,6 @@ class AmazonS3Client {
                 expiresIn: 300, // 5 minutes
             });
             const fileURL = `https://${this.bucketName}.s3.${process.env.S3_REGION}.amazonaws.com/${key}`;
-            console.log({
-                uploadURL,
-                fileURL,
-                key
-            })
             return { uploadURL, fileURL, key };
         } catch (error) {
             console.error('❌ Presigned URL error:', error.message);
