@@ -15,7 +15,7 @@ const LocationSchema = new Schema({
     address: {
         type: String,
         required: function() {
-            return this.parent().status !== 'draft';
+            return this.status !== 'draft';
         }
     },
     coordinates: {
@@ -64,7 +64,7 @@ const PackageSchema = new Schema({
         type: String,
         enum: ['document', 'parcel', 'food', 'fragile', 'electronics', 'clothing', 'medicine', 'furniture', 'jewelry', 'gifts', 'books', 'others'],
         required: function() {
-            return this.parent().status !== 'draft';
+            return this.status !== 'draft';
         }
     },
     dimensions: {
@@ -80,7 +80,25 @@ const PackageSchema = new Schema({
     value: Number, // Declared value for insurance
     isFragile: { type: Boolean, default: false },
     requiresSpecialHandling: { type: Boolean, default: false },
-    images: [String], // Package photos
+    images: [{
+        id: String,
+        key: String,
+        url: String,
+        localUri: String,
+        fileName: String,
+        size: Number,
+        uploadedAt: Date
+    }],
+    video: {
+        key: String,
+        url: String,
+        localUri: String,
+        fileName: String,
+        size: Number,
+        duration: Number,
+        uploadedAt: Date,
+        uploaded: Boolean
+    },
     description: String,
     specialInstructions: String
 }, { _id: false });

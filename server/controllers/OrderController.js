@@ -356,7 +356,59 @@ class OrderController {
     }
 
     static async saveDraft(req, res) {
-        console.log('To be implemented: Save draft order');
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const clientId = userData._id;
+        const orderData = req.body;
+        console.log({
+            orderData,
+            dt: 'pre'
+        })
+
+        try {
+            const { Order } = await getOrderModels();
+            const order = await Order.findOneAndUpdate(
+                { _id: orderData._id, clientId },
+                {
+                    ...orderData,
+                    updatedAt: new Date(),
+                    statusHistory: [
+                        ...orderData.statusHistory,
+                        {
+                            status: 'draft',
+                            timestamp: new Date(),
+                            updatedBy: {
+                                userId: clientId,
+                                role: 'client'
+                            },
+                            notes: 'Order draft saved'
+                        }
+                    ]
+                },
+                { new: true, runValidators: true }
+            );
+
+            if (!order) {
+                return res.status(404).json({ error: "Order not found" });
+            }
+
+            return res.status(200).json({
+                message: "Draft order saved successfully",
+                order: order.toObject()
+            });
+
+        } catch (err) {
+            console.error("Save draft error:", err);
+            return res.status(500).json({ error: "Failed to save draft order" });
+        }
     }
 
     static async updateOrder(req, res) {
