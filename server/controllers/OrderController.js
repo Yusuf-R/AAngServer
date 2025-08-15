@@ -103,7 +103,8 @@ class OrderController {
             const orderData = draftOrder.toObject();
 
             // Fetch all orders for the client
-            const orders = await Order.find({ clientId }).populate('clientId').sort({ createdAt: -1 });
+            const orders = await Order.find({ clientId }).sort({ createdAt: -1 });
+
 
             // Compute statistics via aggregation
             const results = await Order.aggregate([
@@ -217,7 +218,7 @@ class OrderController {
             dashboardData.orderData = newOrder.toObject();
 
             // Fetch all orders for the client
-            const orders = await Order.find({ clientId }).populate('clientId').sort({ createdAt: -1 });
+            const orders = await Order.find({ clientId }).sort({ createdAt: -1 });
 
             // Compute statistics via aggregation
             const results = await Order.aggregate([
@@ -295,7 +296,7 @@ class OrderController {
 
         try {
             const { Order } = await getOrderModels();
-            const orders = await Order.find({ clientId }).populate('clientId').sort({ createdAt: -1 });
+            const orders = await Order.find({ clientId }).sort({ createdAt: -1 });
 
             // Compute statistics using aggregation
             const results = await Order.aggregate([
@@ -460,7 +461,6 @@ class OrderController {
         const { Order } = await getOrderModels();
 
         const orders = await Order.find({ clientId })
-            .populate('clientId')
             .sort({ createdAt: -1 })
             .lean();
 
