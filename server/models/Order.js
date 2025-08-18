@@ -44,13 +44,12 @@ const LocationSchema = new Schema({
         phone: String,
         alternatePhone: String
     },
-    instructions: String,
+    extraInformation: String,
     locationType: {
         type: String,
         enum: ['residential', 'commercial', 'office', 'mall', 'hospital', 'school', 'other'],
         default: 'residential'
     },
-    // For apartment/office buildings
     building: {
         name: String,
         floor: String,
@@ -213,10 +212,14 @@ const OrderSchema = new Schema({
         default: 'normal'
     },
 
-    // Delivery Details
-    pickup: { type: LocationSchema, required: true },
-    dropoff: { type: LocationSchema, required: true },
+    // Package Details
     package: { type: PackageSchema, required: true },
+
+    // Delivery Details
+    location: {
+        pickUp: { type: LocationSchema, required: true },
+        dropOff: { type: LocationSchema, required: true },
+    },
 
     // Scheduling
     scheduledPickup: Date,
@@ -417,8 +420,8 @@ OrderSchema.index({ clientId: 1, status: 1 });
 OrderSchema.index({ 'tracking.driverId': 1, status: 1 });
 OrderSchema.index({ status: 1, createdAt: -1 });
 OrderSchema.index({ orderType: 1, scheduledPickup: 1 });
-OrderSchema.index({ 'pickup.coordinates': '2dsphere' });
-OrderSchema.index({ 'dropoff.coordinates': '2dsphere' });
+OrderSchema.index({ 'location.pickUp.coordinates': '2dsphere' });
+OrderSchema.index({ 'location.dropOff.coordinates': '2dsphere' });
 OrderSchema.index({ createdAt: -1 });
 
 // Virtual for order age
@@ -472,7 +475,7 @@ OrderSchema.statics.findOrdersForDriver = function(driverId) {
 
 OrderSchema.statics.findNearbyOrders = function(lat, lng, maxDistance = 10000) {
     return this.find({
-        'pickup.coordinates': {
+        'location.pickUp.coordinates': {
             $near: {
                 $geometry: { type: 'Point', coordinates: [lng, lat] },
                 $maxDistance: maxDistance
@@ -528,8 +531,8 @@ OrderSchema.statics.getOrderHistory = async function(clientId, limit = 10) {
             '_id',
             'status',
             'createdAt',
-            'dropoff.address',
-            'dropoff.landmark',
+            'location.dropOff.address',
+            'location.dropOff.landmark',
             'package.description',
             'package.category'
         ])

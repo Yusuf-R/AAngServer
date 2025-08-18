@@ -54,13 +54,37 @@ const locationSchema = yup.object().shape({
         .string()
         .max(300, 'Instructions cannot exceed 300 characters'),
 
+    // coordinates: yup.object().shape({
+    //     lat: yup
+    //         .number()
+    //         .required('Latitude is required'),
+    //     lng: yup
+    //         .number()
+    //         .required('Longitude is required'),
+    // }),
     coordinates: yup.object().shape({
-        lat: yup
-            .number()
-            .required('Latitude is required'),
-        lng: yup
-            .number()
-            .required('Longitude is required'),
+        type: yup
+            .string()
+            .oneOf(['Point'])
+            .required('Point type is required'),
+        coordinates: yup
+            .array()
+            .length(2, 'Must be [longitude, latitude] pair')
+            .of(
+                yup.number()
+                    .test('valid-lng', 'Longitude must be between -180 and 180', value =>
+                        value >= -180 && value <= 180
+                    )
+                    .test('valid-lat', 'Latitude must be between -90 and 90', value =>
+                        value >= -90 && value <= 90
+                    )
+            )
+            .required('Coordinates array is required')
+            .test('order', 'First element must be longitude, second latitude', value => {
+                if (!Array.isArray(value)) return true;
+                return value[0] >= -180 && value[0] <= 180 &&
+                    value[1] >= -90 && value[1] <= 90;
+            })
     }),
 });
 

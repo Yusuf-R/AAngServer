@@ -41,22 +41,25 @@ class OrderController {
                 status: 'draft',
 
                 // Minimal required structure to satisfy schema
-                pickup: {
-                    address: 'TBD',
-                    coordinates: {
-                        type: 'Point',
-                        coordinates: [0, 0]
+                location: {
+                    pickUp: {
+                        address: 'TBD',
+                        coordinates: {
+                            type: 'Point',
+                            coordinates: [0, 0]
+                        },
+                        locationType: 'residential'
                     },
-                    locationType: 'residential'
-                },
-                dropoff: {
-                    address: 'TBD',
-                    coordinates: {
-                        type: 'Point',
-                        coordinates: [0, 0]
+                    dropOff: {
+                        address: 'TBD',
+                        coordinates: {
+                            type: 'Point',
+                            coordinates: [0, 0]
+                        },
+                        locationType: 'residential'
                     },
-                    locationType: 'residential'
                 },
+
                 package: {
                     category: 'others',
                     description: 'Draft package'
