@@ -2,6 +2,7 @@ import AuthController from "./AuthController";
 import getOrderModels, {generateOrderRef} from "../models/Order";
 import getModels from "../models/AAng/AAngLogistics";
 import mongoose from "mongoose";
+import { calculateTotalPrice } from "../utils/LogisticPricingEngine";
 
 class OrderController {
 
@@ -372,10 +373,108 @@ class OrderController {
         const {userData} = preCheckResult;
         const clientId = userData._id;
         const orderData = req.body;
+
+        const determineLocationType = (address) => {
+            if (!address) return 'residential';
+            const addressLower = address.toLowerCase();
+            if (addressLower.includes('hospital') || addressLower.includes('clinic') || addressLower.includes('medical')) {
+                return 'hospital';
+            }
+            if (addressLower.includes('mall') || addressLower.includes('shopping') || addressLower.includes('plaza')) {
+                return 'mall';
+            }
+            if (addressLower.includes('office') || addressLower.includes('corporate') || addressLower.includes('business')) {
+                return 'office';
+            }
+            if (addressLower.includes('school') || addressLower.includes('university') || addressLower.includes('college')) {
+                return 'school';
+            }
+            return 'residential';
+        };
+
         console.log({
-            orderData,
-            dt: 'pre'
+            orderData
         })
+
+        // Add this after extracting orderData and before the try block
+        if (orderData.metadata?.draftProgress?.step === 3) {
+
+            // Extract FE calculated total
+            const frontendTotal = orderData.pricing?.totalAmount;
+
+            const frontendInsurance = orderData.insurance;
+
+            console.log({
+                frontendTotal,
+                frontendInsurance
+            })
+
+            // Prepare data for BE calculation
+            const pricingInput = {
+                package: {
+                    weight: orderData.package?.weight || { value: 1, unit: 'kg' },
+                    category: orderData.package?.category || 'parcel',
+                    isFragile: orderData.package?.isFragile || false,
+                    requiresSpecialHandling: orderData.package?.requiresSpecialHandling || false,
+                    declaredValue: frontendInsurance?.declaredValue || 0,
+                    description: orderData.package?.description,
+                    dimensions: orderData.package?.dimensions
+                },
+                location: {
+                    pickUp: {
+                        ...orderData.location?.pickUp,
+                        locationType: determineLocationType(orderData.location?.pickUp?.address)
+                    },
+                    dropOff: {
+                        ...orderData.location?.dropOff,
+                        locationType: determineLocationType(orderData.location?.dropOff?.address)
+                    }
+                },
+                priority: orderData.priority || 'normal',
+                insurance: {
+                    isInsured: frontendInsurance?.isInsured || false,
+                    declaredValue: frontendInsurance?.declaredValue || 0
+                },
+                vehicleRequirements: orderData.vehicleRequirements || []
+            };
+
+            // Calculate on BE
+            const backendPricing = calculateTotalPrice(pricingInput);
+            const backendTotal = backendPricing.displayBreakdown.total;
+
+            console.log({
+                backendPricing,
+                backendTotal,
+                pricingInput
+            })
+            // Security check - compare totals
+            const tolerance = Math.max(1, Math.round(frontendTotal * 0.001)); // 0.1% or minimum 1 NGN
+            if (Math.abs(frontendTotal - backendTotal) > tolerance) {
+                console.error('Pricing mismatch:', {
+                    frontend: frontendTotal,
+                    backend: backendTotal,
+                    difference: frontendTotal - backendTotal,
+                    tolerance
+                });
+                return res.status(400).json({
+                    error: "Pricing verification failed",
+                    debug: process.env.NODE_ENV === 'development' ? {
+                        frontendTotal,
+                        backendTotal,
+                        difference: frontendTotal - backendTotal
+                    } : undefined
+                });
+            }
+
+            // Update orderData with BE-verified pricing and insurance
+            orderData.pricing = backendPricing.backendPricing;
+            orderData.insurance = {
+                ...frontendInsurance,
+                verified: true,
+                verifiedAt: new Date()
+            };
+            console.log('Pricing and insurance verified by backend');
+        }
 
         try {
             const { Order } = await getOrderModels();

@@ -61,7 +61,7 @@ const LocationSchema = new Schema({
 const PackageSchema = new Schema({
     category: {
         type: String,
-        enum: ['document', 'parcel', 'food', 'fragile', 'electronics', 'clothing', 'medicine', 'furniture', 'jewelry', 'gifts', 'books', 'others'],
+        enum: ['document', 'parcel', 'food', 'fragile', 'laptop', 'mobilePhone', 'electronics', 'cake', 'clothing', 'medicine', 'furniture', 'jewelry', 'gifts', 'books', 'others'],
         required: function() {
             return this.status !== 'draft';
         }
@@ -76,7 +76,6 @@ const PackageSchema = new Schema({
         value: Number,
         unit: { type: String, enum: ['kg', 'g'], default: 'kg' }
     },
-    value: Number, // Declared value for insurance
     isFragile: { type: Boolean, default: false },
     requiresSpecialHandling: { type: Boolean, default: false },
     images: [{
@@ -231,8 +230,8 @@ const OrderSchema = new Schema({
     // Vehicle Requirements
     vehicleRequirements: {
         type: [String],
-        enum: ['bicycle', 'motorcycle', 'tricycle', 'van', 'truck'],
-        default: ['bicycle', 'motorcycle']
+        enum: ['bicycle', 'motorcycle', 'tricycle', 'van', 'truck', 'car', 'other'],
+        default: []
     },
 
     // Order Status
@@ -240,6 +239,10 @@ const OrderSchema = new Schema({
         type: String,
         enum: [
             'draft',           // Order being created
+            'submitted',        // Submitted by client
+            'admin_review',    // Under admin review
+            'admin_approved',  // Approved by admin
+            'admin_rejected',  // Rejected by admin
             'pending',         // Waiting for driver assignment
             'broadcast',       // Broadcasted to available drivers
             'assigned',        // Driver assigned
@@ -358,6 +361,7 @@ const OrderSchema = new Schema({
     // Insurance and Liability
     insurance: {
         isInsured: { type: Boolean, default: false },
+        declaredValue: Number,
         coverage: Number,
         provider: String,
         policyNumber: String
@@ -390,13 +394,11 @@ const OrderSchema = new Schema({
 
             // Track form field completion for better UX
             fieldCompletion: {
-                pickup: { type: Boolean, default: false },
-                dropoff: { type: Boolean, default: false },
+                location: { type: Boolean, default: false },
                 package: { type: Boolean, default: false },
-                scheduling: { type: Boolean, default: false },
-                vehicle: { type: Boolean, default: false },
+                vehicleRequirements: { type: Boolean, default: false },
                 payment: { type: Boolean, default: false },
-                confirmation: { type: Boolean, default: false }
+                review: { type: Boolean, default: false }
             }
         }
     },
