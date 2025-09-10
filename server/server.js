@@ -26,6 +26,9 @@ app.options('*', cors(corsOptions));
 app.use(cors(corsOptions));
 
 // 📌 REST API routes
+app.use('/api/v1/order/paystack-webhook', express.raw({
+    type: 'application/json'
+}));
 app.use(router);
 const port = process.env.EXPRESS_PORT;
 

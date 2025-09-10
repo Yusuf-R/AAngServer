@@ -21,5 +21,9 @@ orderRouter.get('/all', orderController.getAllClientOrders);
 orderRouter.delete('/delete', orderController.deleteOrder);
 orderRouter.patch('/save', orderController.saveDraft);
 orderRouter.patch('/submit', orderController.submitOrder);
+orderRouter.post('/init-pay', orderController.initiatePayment);
+orderRouter.get('/payment-callback', orderController.paystackPaymentCallback); // after payment[MUST], the browser triggers base on the callback_url as provided
+orderRouter.get('/payment-status', orderController.checkPaymentStatus); // To check payment status by the FE
+orderRouter.post('/paystack-webhook', orderController.paystackWebhook);
 
 module.exports = orderRouter;

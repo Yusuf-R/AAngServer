@@ -238,8 +238,8 @@ const OrderSchema = new Schema({
     status: {
         type: String,
         enum: [
-            'draft',           // Order being created
-            'submitted',        // Submitted by client
+            'draft',           // Order being created and not yet submitted
+            'submitted',        // Submitted by client and paid
             'admin_review',    // Under admin review
             'admin_approved',  // Approved by admin
             'admin_rejected',  // Rejected by admin
@@ -268,7 +268,7 @@ const OrderSchema = new Schema({
     payment: {
         method: {
             type: String,
-            enum: ['wallet', 'card', 'bank_transfer', 'cash_on_delivery', 'cash_on_pickup'],
+            enum: ['Wallet', 'PayStack', 'BankTransfer'],
             required: true
         },
         status: {
@@ -277,6 +277,10 @@ const OrderSchema = new Schema({
             default: 'pending'
         },
         transactionId: String,
+        amount: Number,
+        currency: { type: String, default: 'NGN' },
+        reference: String,
+        initiatedAt: Date,
         paidAt: Date,
         refundedAt: Date,
         refundReason: String

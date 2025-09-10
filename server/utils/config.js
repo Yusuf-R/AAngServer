@@ -9,8 +9,9 @@ class SecurityConfig {
     get corsOptions() {
         return {
             origin: [
-                "http://localhost:3000",
-                "http://localhost:8081"
+                "http://localhost:5000",
+                "http://localhost:8081",
+                "*",
             ],
             methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
             credentials: true,
