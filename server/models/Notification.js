@@ -1,5 +1,6 @@
 // Enhanced Notification Schema with deep categorization and intelligence
 import mongoose from "mongoose";
+const {Schema, model} = mongoose;
 
 const NotificationSchema = new mongoose.Schema({
     userId: {
@@ -31,8 +32,8 @@ const NotificationSchema = new mongoose.Schema({
         type: String,
         enum: [
             // ORDER category
-            'order.created',
-            'order.confirmed',
+            'order.created', // when the process of the order is fully completed (always true after payment is successful)
+            'order.confirmed', // when the order is confirmed by the admin
             'order.cancelled',
             'order.modified',
 
@@ -49,7 +50,7 @@ const NotificationSchema = new mongoose.Schema({
             'security.password_changed',
             'security.pin_set',
             'security.pin_reset',
-            'security.pin_update',
+            'security.pin_updated',
             'security.login_attempt',
             'security.device_login',
             'security.suspicious_activity',
@@ -112,6 +113,9 @@ const NotificationSchema = new mongoose.Schema({
             required: true,
             maxlength: 500,
         },
+        orderRef: {
+            type: String,
+        },
         // For rich notifications with images, buttons, etc.
         richContent: {
             imageUrl: String,
@@ -128,24 +132,31 @@ const NotificationSchema = new mongoose.Schema({
     metadata: {
         // Related entity references
         orderId: mongoose.Schema.Types.ObjectId,
+        orderRef: String,
+        totalAmount: Number,
+        status: String, // e.g., 'pending', 'confirmed', 'delivered'
         driverId: mongoose.Schema.Types.ObjectId,
         paymentId: mongoose.Schema.Types.ObjectId,
-
+        gateway: String, // e.g., 'stripe', 'paypal, paystack'
+        paymentData: {
+            type: Schema.Types.Mixed,
+            default: null
+        },
         // Tracking and analytics
         source: String, // 'system', 'admin', 'auto-trigger'
         campaign: String, // For promotional notifications
 
         // Delivery preferences
         channels: {
-            push: { type: Boolean, default: true },
-            email: { type: Boolean, default: false },
-            sms: { type: Boolean, default: false },
-            inApp: { type: Boolean, default: true },
+            push: {type: Boolean, default: true},
+            email: {type: Boolean, default: false},
+            sms: {type: Boolean, default: false},
+            inApp: {type: Boolean, default: true},
         },
 
         // Smart delivery timing
         deliveryTiming: {
-            immediate: { type: Boolean, default: true },
+            immediate: {type: Boolean, default: true},
             scheduledFor: Date,
             timezone: String,
         },
@@ -153,14 +164,14 @@ const NotificationSchema = new mongoose.Schema({
         // Interaction tracking
         interactions: [{
             action: String, // 'opened', 'clicked', 'dismissed'
-            timestamp: { type: Date, default: Date.now },
+            timestamp: {type: Date, default: Date.now},
             channel: String,
         }],
 
         // Expiry and lifecycle
         expiresAt: Date,
-        retryCount: { type: Number, default: 0 },
-        maxRetries: { type: Number, default: 3 },
+        retryCount: {type: Number, default: 0},
+        maxRetries: {type: Number, default: 3},
     },
 
     // Status tracking
@@ -173,55 +184,55 @@ const NotificationSchema = new mongoose.Schema({
 
     // Read status with timestamp
     read: {
-        status: { type: Boolean, default: false },
+        status: {type: Boolean, default: false},
         readAt: Date,
     },
 
     // Soft delete for data retention
     deleted: {
-        status: { type: Boolean, default: false },
+        status: {type: Boolean, default: false},
         deletedAt: Date,
     },
 
     // Timestamps
-    createdAt: { type: Date, default: Date.now, index: true },
-    updatedAt: { type: Date, default: Date.now },
+    createdAt: {type: Date, default: Date.now, index: true},
+    updatedAt: {type: Date, default: Date.now},
     sentAt: Date,
     deliveredAt: Date,
 });
 
 // Compound indexes for efficient queries
-NotificationSchema.index({ userId: 1, createdAt: -1 });
-NotificationSchema.index({ userId: 1, status: 1 });
-NotificationSchema.index({ userId: 1, category: 1, createdAt: -1 });
-NotificationSchema.index({ priority: 1, status: 1, createdAt: 1 });
-NotificationSchema.index({ 'metadata.orderId': 1 });
+NotificationSchema.index({userId: 1, createdAt: -1});
+NotificationSchema.index({userId: 1, status: 1});
+NotificationSchema.index({userId: 1, category: 1, createdAt: -1});
+NotificationSchema.index({priority: 1, status: 1, createdAt: 1});
+NotificationSchema.index({'metadata.orderId': 1, 'metadata.orderRef': 1});
 
 // Pre-save middleware to update timestamps
-NotificationSchema.pre('save', function(next) {
+NotificationSchema.pre('save', function (next) {
     this.updatedAt = new Date();
     next();
 });
 
 // Virtual for checking if notification is actionable
-NotificationSchema.virtual('isActionable').get(function() {
+NotificationSchema.virtual('isActionable').get(function () {
     return this.content.richContent?.actionButtons?.length > 0;
 });
 
 // Virtual for checking if expired
-NotificationSchema.virtual('isExpired').get(function() {
+NotificationSchema.virtual('isExpired').get(function () {
     return this.metadata.expiresAt && this.metadata.expiresAt < new Date();
 });
 
 // Methods for common operations
-NotificationSchema.methods.markAsRead = function() {
+NotificationSchema.methods.markAsRead = function () {
     this.read.status = true;
     this.read.readAt = new Date();
     this.status = 'READ';
     return this.save();
 };
 
-NotificationSchema.methods.addInteraction = function(action, channel = 'app') {
+NotificationSchema.methods.addInteraction = function (action, channel = 'app') {
     this.metadata.interactions.push({
         action,
         channel,
@@ -230,41 +241,41 @@ NotificationSchema.methods.addInteraction = function(action, channel = 'app') {
     return this.save();
 };
 
-NotificationSchema.methods.softDelete = function() {
+NotificationSchema.methods.softDelete = function () {
     this.deleted.status = true;
     this.deleted.deletedAt = new Date();
     return this.save();
 };
 
 // Static methods for intelligent querying
-NotificationSchema.statics.getUnreadCount = function(userId) {
+NotificationSchema.statics.getUnreadCount = function (userId) {
     return this.countDocuments({
         userId,
         'read.status': false,
         'deleted.status': false,
-        status: { $in: ['SENT', 'DELIVERED'] }
+        status: {$in: ['SENT', 'DELIVERED']}
     });
 };
 
-NotificationSchema.statics.getByCategory = function(userId, category, limit = 20) {
+NotificationSchema.statics.getByCategory = function (userId, category, limit = 20) {
     return this.find({
         userId,
         category,
         'deleted.status': false
     })
-        .sort({ createdAt: -1 })
+        .sort({createdAt: -1})
         .limit(limit);
 };
 
-NotificationSchema.statics.getPriorityNotifications = function(userId) {
+NotificationSchema.statics.getPriorityNotifications = function (userId) {
     return this.find({
         userId,
-        priority: { $in: ['HIGH', 'URGENT', 'CRITICAL'] },
+        priority: {$in: ['HIGH', 'URGENT', 'CRITICAL']},
         'read.status': false,
         'deleted.status': false,
-        status: { $in: ['SENT', 'DELIVERED'] }
+        status: {$in: ['SENT', 'DELIVERED']}
     })
-        .sort({ priority: -1, createdAt: -1 });
+        .sort({priority: -1, createdAt: -1});
 };
 
 export default mongoose.models.Notification || mongoose.model("Notification", NotificationSchema);

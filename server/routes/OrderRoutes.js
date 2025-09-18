@@ -23,7 +23,7 @@ orderRouter.patch('/save', orderController.saveDraft);
 orderRouter.patch('/submit', orderController.submitOrder);
 orderRouter.post('/init-pay', orderController.initiatePayment);
 orderRouter.get('/payment-callback', orderController.paystackPaymentCallback); // after payment[MUST], the browser triggers base on the callback_url as provided
-orderRouter.get('/payment-status', orderController.checkPaymentStatus); // To check payment status by the FE
-orderRouter.post('/paystack-webhook', orderController.paystackWebhook);
+orderRouter.get('/payment-status', orderController.checkPaymentStatus); // To check payment status by the FE once browser has returned to the app
+orderRouter.post('/paystack-webhook', orderController.paystackWebhook); // payStack uses this to talk to BE base on whatever action the user did on the browser
 
 module.exports = orderRouter;

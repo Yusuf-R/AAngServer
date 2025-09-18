@@ -1,5 +1,5 @@
 import NotificationService from '../services/NotificationService';
-import Notification from '../models/Notifications';
+import Notification from '../models/Notification';
 
 class NotificationSocket {
     /**

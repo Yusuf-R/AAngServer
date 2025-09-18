@@ -1,5 +1,5 @@
 // Core Notification Service - The brain of your notification system
-import Notification from '../models/Notifications';
+import Notification from '../models/Notification';
 import {EventEmitter} from 'events';
 import SocketEmitter from "../utils/socketEmitter";
 
@@ -31,37 +31,50 @@ class NotificationService extends EventEmitter {
     loadTemplates() {
         this.templates.set('order.created', {
             title: '🎉 Order Created Successfully!',
-            body: 'Your order #{orderId} has been created and is being processed.',
+            body: 'Your order {orderId} has been created and is being processed.',
+            orderRef: '{orderId}',
             priority: 'NORMAL',
             channels: { push: true, inApp: true },
             actionButtons: [
-                { label: 'Track Order', action: 'navigate', deepLink: '/orders/{orderId}' },
-                { label: 'View Details', action: 'modal', deepLink: '/orders/{orderId}/details' }
+                { label: 'Track Order', action: 'track', deepLink: '/client/orders/track' },
+                { label: 'View Details', action: 'view', deepLink: '/client/orders/view' }
             ]
         });
 
+        // delivery
         this.templates.set('delivery.driver_assigned', {
             title: '🚚 Driver Assigned!',
             body: '{driverName} will pick up your order. ETA: {estimatedTime}',
             priority: 'HIGH',
             channels: { push: true, inApp: true, sms: true },
             actionButtons: [
-                { label: 'Track Live', action: 'navigate', deepLink: '/tracking/{orderId}' },
+                { label: 'Track Live', action: 'track', deepLink: '/tracking/track' },
                 { label: 'Contact Driver', action: 'call', deepLink: 'tel:{driverPhone}' }
             ]
         });
 
+        // Payment
+        // Failed Payment Template
         this.templates.set('payment.failed', {
             title: '⚠️ Payment Failed',
-            body: 'Your payment for order #{orderId} failed. Please update your payment method.',
+            body: 'Your payment for order {orderId} failed. Please check and try again.',
+            orderRef: '{orderId}',
             priority: 'URGENT',
             channels: { push: true, inApp: true, email: true },
-            actionButtons: [
-                { label: 'Retry Payment', action: 'navigate', deepLink: '/payment/retry/{orderId}' },
-                { label: 'Update Card', action: 'navigate', deepLink: '/payment/methods' }
-            ]
         });
 
+        // Successful Payment Template
+        this.templates.set('payment.successful', {
+            title: '✅ Payment Successful',
+            body: 'Your payment for order {orderId} was successful. Thank you!',
+            orderRef: '{orderId}',
+            amountPaid: '{totalAmount}',
+            priority: 'NORMAL',
+            channels: { push: true, inApp: true, email: true },
+        });
+
+
+        // profile
         this.templates.set('identity.complete_profile_reminder', {
             title: '📋 Complete Your Profile',
             body: 'Complete your profile to unlock faster deliveries and better rates!',
@@ -225,6 +238,8 @@ class NotificationService extends EventEmitter {
                     // Replace template placeholders with actual data
                     title: this.interpolateTemplate(template.title, templateData),
                     body: this.interpolateTemplate(template.body, templateData),
+                    orderRef: this.interpolateTemplate(template.orderRef || '', templateData),
+                    amountPaid: this.interpolateTemplate(template.amountPaid || '', templateData),
                     richContent: {
                         // Process action buttons with deep links
                         actionButtons: template.actionButtons?.map(button => ({
@@ -545,7 +560,7 @@ class NotificationService extends EventEmitter {
      */
 
     async cleanupOldNotifications(daysOld = 30) {
-        const cutoffDate = new Date();
+        const cutoffDate = new Date();templates
         cutoffDate.setDate(cutoffDate.getDate() - daysOld);
 
         // Delete read, low/normal priority notifications older than X days
@@ -555,9 +570,6 @@ class NotificationService extends EventEmitter {
             'read.status': true
         });
     }
-
-
-
 
 }
 

@@ -5,16 +5,11 @@ import mongoose from "mongoose";
 import {calculateTotalPrice} from "../utils/LogisticPricingEngine";
 import axios from "axios";
 import crypto from 'crypto';
+import NotificationService from "../services/NotificationService";
+import Notification from "../models/Notification";
 
 const secret = process.env.PAYSTACK_SECRET_KEY;
 const url = process.env.PAYSTACK_URL;
-const callback_url = process.env.API_BASE_UR;
-const appSchema = process.env.APP_DEEP_LINK || 'aang-logistics';
-console.log({
-    secret,
-    url
-})
-
 // Payment constants
 const PAYMENT_STATUS = {
     PENDING: 'pending',
@@ -24,14 +19,12 @@ const PAYMENT_STATUS = {
     REFUNDED: 'refunded',
     CANCELLED: 'cancelled'
 };
-
 const ORDER_STATUS = {
     DRAFT: 'draft',
     SUBMITTED: 'submitted',
     CONFIRMED: 'confirmed',
     CANCELLED: 'cancelled'
 };
-
 
 // PayStack verification utility
 const verifyPayStackTransaction = async (reference) => {
@@ -51,7 +44,6 @@ const verifyPayStackTransaction = async (reference) => {
         throw new Error('Payment verification failed');
     }
 };
-
 // Webhook signature verification
 const verifyWebhookSignature = (payload, signature) => {
     const hash = crypto
@@ -62,7 +54,6 @@ const verifyWebhookSignature = (payload, signature) => {
 
     return hash === signature;
 };
-
 // Generate idempotency key
 const generateIdempotencyKey = (orderId, attemptId) => {
     return crypto
@@ -71,7 +62,6 @@ const generateIdempotencyKey = (orderId, attemptId) => {
         .digest('hex')
         .substring(0, 32);
 };
-
 
 class OrderController {
 
@@ -159,7 +149,7 @@ class OrderController {
                 // Generate delivery token for later use
                 deliveryToken: generateDeliveryToken(),
 
-                statusHistory: [{
+                orderInstantHistory: [{
                     status: 'draft',
                     timestamp: new Date(),
                     updatedBy: {
@@ -167,6 +157,15 @@ class OrderController {
                         role: 'client'
                     },
                     notes: 'Draft order instantiated for form completion'
+                }],
+                orderTrackingHistory: [{
+                    status: 'order_created',
+                    timestamp: new Date(),
+                    title: 'Order Created',
+                    description: 'Your order has been created and is currently in draft status.',
+                    icon: '📦',
+                    isCompleted: false,
+                    isCurrent: true,
                 }]
             });
 
@@ -269,7 +268,7 @@ class OrderController {
                 orderRef: generateOrderRef(),
                 status: 'draft',
                 deliveryToken: generateDeliveryToken(),
-                statusHistory: [{
+                orderInstantHistory: [{
                     status: 'draft',
                     timestamp: new Date(),
                     updatedBy: {
@@ -277,6 +276,15 @@ class OrderController {
                         role: 'client'
                     },
                     notes: 'Order created and saved as draft'
+                }],
+                orderTrackingHistory: [{
+                    status: 'order_created',
+                    timestamp: new Date(),
+                    title: 'Order Created',
+                    description: 'Your order has been created and is currently in draft status.',
+                    icon: '📦',
+                    isCompleted: false,
+                    isCurrent: true,
                 }]
             });
 
@@ -462,7 +470,8 @@ class OrderController {
             }
             return 'residential';
         };
-        // Add this after extracting orderData and before the try block
+
+        // step 3 is review (+ insurance) and final pricing
         if (orderData.metadata?.draftProgress?.step === 3) {
 
             // Extract FE calculated total
@@ -508,11 +517,6 @@ class OrderController {
             const backendPricing = calculateTotalPrice(pricingInput);
             const backendTotal = backendPricing.displayBreakdown.total;
 
-            console.log({
-                backendPricing,
-                backendTotal,
-                pricingInput
-            })
             // Security check - compare totals
             const tolerance = Math.max(1, Math.round(frontendTotal * 0.001)); // 0.1% or minimum 1 NGN
             if (Math.abs(frontendTotal - backendTotal) > tolerance) {
@@ -544,14 +548,33 @@ class OrderController {
 
         try {
             const {Order} = await getOrderModels();
+
             const order = await Order.findOneAndUpdate(
                 {_id: orderData._id, clientId},
                 {
-                    ...orderData,
-                    updatedAt: new Date(),
-                    statusHistory: [
-                        ...orderData.statusHistory,
-                        {
+                    $set: {
+                        // All the main fields
+                        package: orderData.package,
+                        location: orderData.location,
+                        vehicleRequirements: orderData.vehicleRequirements,
+                        pricing: orderData.pricing,
+                        insurance: orderData.insurance,
+                        priority: orderData.priority,
+                        orderType: orderData.orderType,
+
+                        // Metadata updates with derived fieldCompletion
+                        'metadata.draftProgress.step': orderData.metadata.draftProgress.step,
+                        'metadata.draftProgress.completedSteps': orderData.metadata.draftProgress.completedSteps,
+                        'metadata.draftProgress.lastUpdated': new Date(),
+                        'metadata.draftProgress.fieldCompletion.package': orderData.metadata.draftProgress.completedSteps?.includes(0) || false,
+                        'metadata.draftProgress.fieldCompletion.location': orderData.metadata.draftProgress.completedSteps?.includes(1) || false,
+                        'metadata.draftProgress.fieldCompletion.vehicleRequirements': orderData.metadata.draftProgress.completedSteps?.includes(2) || false,
+                        'metadata.draftProgress.fieldCompletion.review': orderData.metadata.draftProgress.completedSteps?.includes(3) || false,
+
+                        updatedAt: new Date()
+                    },
+                    $push: {
+                        orderInstantHistory: {
                             status: 'draft',
                             timestamp: new Date(),
                             updatedBy: {
@@ -560,7 +583,7 @@ class OrderController {
                             },
                             notes: 'Order draft saved'
                         }
-                    ]
+                    }
                 },
                 {new: true, runValidators: true}
             );
@@ -723,14 +746,18 @@ class OrderController {
                 [PAYMENT_STATUS.PROCESSING, PAYMENT_STATUS.PENDING].includes(order.payment.status)) {
 
                 const timeSinceInit = Date.now() - new Date(order.payment.initiatedAt).getTime();
+                const COOLDOWN_PERIOD = 30 * 1000;
 
                 // If less than 10 minutes since last initiation, return existing reference
-                if (timeSinceInit < 10 * 60 * 1000) {
+                if (timeSinceInit < COOLDOWN_PERIOD) {
+                    const timeToWait = Math.ceil((COOLDOWN_PERIOD - timeSinceInit) / 1000); // Convert to seconds
                     return res.status(409).json({
                         error: "Payment already in progress",
                         details: "A payment is already being processed for this order",
                         reference: order.payment.reference,
-                        authorizationUrl: order.payment.metadata?.checkoutUrl
+                        authorizationUrl: order.payment.metadata?.checkoutUrl,
+                        timeToWait: timeToWait, // Time in seconds
+                        retryAfter: new Date(Date.now() + (COOLDOWN_PERIOD - timeSinceInit)).toISOString()
                     });
                 }
             }
@@ -807,7 +834,7 @@ class OrderController {
                         'metadata.lastPaymentAttempt': new Date()
                     },
                     $push: {
-                        statusHistory: {
+                        orderInstantHistory: {
                             status: 'payment_initiated',
                             timestamp: new Date(),
                             updatedBy: {
@@ -864,7 +891,16 @@ class OrderController {
     }
 
     /**
-     * Enhanced payment callback with deep linking
+     * This callback is invoked by PayStack after payment completion
+     * Paystack will pass this url to the browser
+     * Browser will trigger the url which will then make an api call essentially to this function
+     * We then verify the payment and update the order accordingly
+     * Upon Success, we return with a deep link url which will trigger the mobile device to close the browser and open the app
+     * the App opens to the deep link provided
+     * Upon Failure, we return with a deep link url which will trigger the mobile device to close the browser and open the app
+     * the App opens to the deep link provided
+     * @param req
+     * @param res
      */
     static async paystackPaymentCallback(req, res) {
         let {orderId, reference} = req.query;
@@ -898,6 +934,10 @@ class OrderController {
             try {
                 const verification = await verifyPayStackTransaction(reference);
                 const verificationData = verification.data;
+                console.log({
+                    verificationData,
+                    verification
+                })
 
                 if (verificationData.status === 'success') {
                     // Verify amount
@@ -922,10 +962,17 @@ class OrderController {
                                 'payment.status': PAYMENT_STATUS.PAID,
                                 'payment.paidAt': new Date(),
                                 'payment.paystackData': verificationData,
-                                'status': ORDER_STATUS.SUBMITTED
+                                'status': ORDER_STATUS.SUBMITTED,
+                                'metadata.draftProgress.step': 4,
+                                'metadata.draftProgress.fieldCompletion.payment': true,
+                                'metadata.draftProgress.completedAt': new Date(),
+                                'metadata.draftProgress.lastUpdated': new Date()
+                            },
+                            $addToSet: {
+                                'metadata.draftProgress.completedSteps': 4
                             },
                             $push: {
-                                statusHistory: {
+                                orderInstantHistory: {
                                     status: ORDER_STATUS.CONFIRMED,
                                     timestamp: new Date(),
                                     updatedBy: {
@@ -933,11 +980,84 @@ class OrderController {
                                         role: 'system'
                                     },
                                     notes: `Payment confirmed via callback. Reference: ${reference}`
+                                },
+                                orderTrackingHistory: {
+                                    $each: [
+                                        {
+                                            status: 'order_submitted',
+                                            timestamp: new Date(),
+                                            title: 'Order Submitted',
+                                            description: 'Your order has been submitted and is pending processing.',
+                                            icon: "📤",
+                                            isCompleted: false,
+                                            isCurrent: true,
+                                        },
+                                        {
+                                            status: 'payment_completed',
+                                            timestamp: new Date(),
+                                            title: 'Payment Completed',
+                                            description: 'Your payment was successful via callback. Order is now submitted for processing.',
+                                            icon: "✅",
+                                            isCompleted: true,
+                                            isCurrent: true,
+                                        },
+
+                                    ]
                                 }
                             }
                         },
                         {new: true}
                     );
+                    // send notification if not existing
+                    const [existingOrderNotification, existingPaymentNotification] = await Promise.all([
+                        Notification.findOne({
+                            userId: order.clientId,
+                            category: 'ORDER',
+                            type: 'order.created',
+                            'metadata.orderId': order._id,
+                            'metadata.orderRef': order.orderRef
+                        }).lean(),
+
+                        Notification.findOne({
+                            userId: order.clientId,
+                            category: 'PAYMENT',
+                            type: 'payment.successful',
+                            'metadata.orderId': order._id,
+                            'metadata.gateway': 'PayStack'
+                        }).lean()
+                    ]);
+
+                    // Create notifications only if they don't exist
+                    if (!existingOrderNotification) {
+                        await NotificationService.createNotification({
+                            userId: order.clientId,
+                            type: 'order.created',
+                            templateData: {
+                                orderId: order.orderRef
+                            },
+                            metadata: {
+                                orderId: order._id,
+                                orderRef: order.orderRef,
+                            }
+                        });
+                    }
+
+                    if (!existingPaymentNotification) {
+                        await NotificationService.createNotification({
+                            userId: order.clientId,
+                            type: 'payment.successful',
+                            templateData: {
+                                amount: verificationData.amount,
+                                orderId: order.orderRef
+                            },
+                            metadata: {
+                                orderId: order._id,
+                                orderRef: order.orderRef,
+                                paymentData: verificationData,
+                                gateway: 'PayStack'
+                            }
+                        });
+                    }
 
                     console.log('✅ Payment successful via callback:', reference);
                     return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reference=${reference}`);
@@ -959,25 +1079,41 @@ class OrderController {
                             }
                         }
                     );
+                    const paymentNotification = await Notification.findOne({
+                        userId: order.clientId,
+                        category: 'PAYMENT',
+                        type: 'payment.failed',
+                        metadata: {
+                            orderId: order._id,
+                            orderRef: order.orderRef,
+                            gateway: 'PayStack',
+                        }
+                    });
+                    if (!paymentNotification) {
+                        await NotificationService.createNotification({
+                            userId: order.clientId,
+                            type: 'payment.failed',
+                            templateData: {
+                                amount: order.pricing.totalAmount,
+                                orderId: order.orderRef
+                            },
+                            metadata: {
+                                orderId: order._id,
+                                orderRef: order.orderRef,
+                                totalAmount: order.pricing.totalAmount,
+                                status: 'failed',
+                                gateway: 'PayStack',
+                                reason: verificationData.gateway_response || 'Payment failed',
+                            }
+                        });
+                    }
                     return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reason=${encodeURIComponent(verificationData.gateway_response || 'payment_failed')}`);
                 }
 
-            } catch (verificationError) {
+            } catch
+                (verificationError) {
                 console.log('Payment verification failed in callback:', verificationError);
-                //     return res.send(`
-                //     <html lang="en">
-                //         <head><title>Verification Failed</title></head>
-                //         <body>
-                //             <script>
-                //                 window.location.href = "${process.env.APP_DEEP_LINK}://payment-status?orderId=${orderId}&reason=verification_failed";
-                //                 setTimeout(() => {
-                //                     window.close();
-                //                 }, 1000);
-                //             </script>
-                //             <p>Payment verification failed. Redirecting back to app...</p>
-                //         </body>
-                //     </html>
-                // `);
+                // Send a notification to the user about verification failure
                 return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reason=verification_failed`);
             }
 
@@ -1008,14 +1144,6 @@ class OrderController {
         const clientId = userData._id;
         // check both query params and body for flexibility
         const {reference, orderId} = {...req.query, ...req.body};
-        console.log({
-            msg: 'Checking payment status',
-            clientId,
-            reference,
-            orderId,
-            payload: req.body,
-            payQuery: req.query
-        })
 
         if (!reference || !orderId) {
             return res.status(400).json({
@@ -1079,6 +1207,7 @@ class OrderController {
                     }
 
                     // Update order status atomically
+                    // new: update metadata,
                     const updatedOrder = await Order.findOneAndUpdate(
                         {
                             _id: orderId,
@@ -1090,10 +1219,17 @@ class OrderController {
                                 'payment.status': PAYMENT_STATUS.PAID,
                                 'payment.paidAt': new Date(),
                                 'payment.paystackData': verificationData,
-                                'status': ORDER_STATUS.CONFIRMED
+                                'status': ORDER_STATUS.CONFIRMED,
+                                'metadata.draftProgress.step': 4,
+                                'metadata.draftProgress.fieldCompletion.payment': true,
+                                'metadata.draftProgress.completedAt': new Date(),
+                                'metadata.draftProgress.lastUpdated': new Date()
+                            },
+                            $addToSet: {
+                                'metadata.draftProgress.completedSteps': 4
                             },
                             $push: {
-                                statusHistory: {
+                                orderInstantHistory: {
                                     status: ORDER_STATUS.CONFIRMED,
                                     timestamp: new Date(),
                                     updatedBy: {
@@ -1101,6 +1237,28 @@ class OrderController {
                                         role: 'system'
                                     },
                                     notes: `Payment confirmed via PayStack. Reference: ${reference}, Amount: ₦${paidAmount}`
+                                },
+                                orderTrackingHistory: {
+                                    $each: [
+                                        {
+                                            status: 'order_submitted',
+                                            timestamp: new Date(),
+                                            title: 'Order Submitted',
+                                            description: 'Your order has been submitted and is pending processing.',
+                                            icon: "📤",
+                                            isCompleted: false,
+                                            isCurrent: true,
+                                        },
+                                        {
+                                            status: 'payment_completed',
+                                            timestamp: new Date(),
+                                            title: 'Payment Completed',
+                                            description: 'Your payment was successful via Paystack. Order is now submitted for processing.',
+                                            icon: "✅",
+                                            isCompleted: true,
+                                            isCurrent: true,
+                                        }
+                                    ]
                                 }
                             }
                         },
@@ -1109,6 +1267,58 @@ class OrderController {
 
                     if (updatedOrder) {
                         console.log('✅ Payment confirmed and order updated:', reference);
+                        // Send notification if not already sent
+                        const [existingOrderNotification, existingPaymentNotification] = await Promise.all([
+                            Notification.findOne({
+                                userId: order.clientId,
+                                category: 'ORDER',
+                                type: 'order.created',
+                                'metadata.orderId': order._id,
+                                'metadata.orderRef': order.orderRef
+                            }).lean(),
+
+                            Notification.findOne({
+                                userId: order.clientId,
+                                category: 'PAYMENT',
+                                type: 'payment.successful',
+                                'metadata.orderId': order._id,
+                                'metadata.gateway': 'PayStack'
+                            }).lean()
+                        ]);
+
+                        // Create notifications only if they don't exist
+                        if (!existingOrderNotification) {
+                            await NotificationService.createNotification({
+                                userId: order.clientId,
+                                type: 'order.created',
+                                templateData: {
+                                    orderId: order.orderRef
+                                },
+                                metadata: {
+                                    orderId: order._id,
+                                    orderRef: order.orderRef,
+                                }
+                            });
+                        }
+
+                        if (!existingPaymentNotification) {
+                            await NotificationService.createNotification({
+                                userId: order.clientId,
+                                type: 'payment.successful',
+                                templateData: {
+                                    amount: verificationData.amount,
+                                    orderId: order.orderRef
+                                },
+                                metadata: {
+                                    orderId: order._id,
+                                    orderRef: order.orderRef,
+                                    paymentData: verificationData,
+                                    gateway: 'PayStack'
+                                }
+                            });
+                        }
+
+                        console.log('✅ Order created notification sent');
 
                         return res.status(200).json({
                             status: 'paid',
@@ -1190,7 +1400,7 @@ class OrderController {
             body = JSON.stringify(body);
         }
 
-        // Verify webhook signature
+        // Verify webhook signature is from PayStack
         if (!signature || !verifyWebhookSignature(body, signature)) {
             console.log('Invalid webhook signature');
             return res.status(401).json({error: 'Invalid signature'});
@@ -1255,7 +1465,7 @@ class OrderController {
                         ...(status === 'failed' && {'payment.transferFailureReason': reason})
                     },
                     $push: {
-                        statusHistory: {
+                        orderInstantHistory: {
                             status: `transfer_${status}`,
                             timestamp: new Date(),
                             updatedBy: {
@@ -1323,10 +1533,17 @@ class OrderController {
                         'payment.status': PAYMENT_STATUS.PAID,
                         'payment.paidAt': new Date(),
                         'payment.webhookData': data,
-                        'status': ORDER_STATUS.CONFIRMED
+                        'status': ORDER_STATUS.CONFIRMED,
+                        'metadata.draftProgress.step': 4,
+                        'metadata.draftProgress.fieldCompletion.payment': true,
+                        'metadata.draftProgress.completedAt': new Date(),
+                        'metadata.draftProgress.lastUpdated': new Date(),
+                    },
+                    $addToSet: {
+                        'metadata.draftProgress.completedSteps': 4
                     },
                     $push: {
-                        statusHistory: {
+                        orderInstantHistory: {
                             status: ORDER_STATUS.CONFIRMED,
                             timestamp: new Date(),
                             updatedBy: {
@@ -1334,15 +1551,34 @@ class OrderController {
                                 role: 'system'
                             },
                             notes: `Payment confirmed via webhook. Reference: ${reference}`
+                        },
+                        orderTrackingHistory: {
+                            $each: [
+                                {
+                                    status: 'order_submitted',
+                                    timestamp: new Date(),
+                                    title: 'Order Submitted',
+                                    description: 'Your order has been submitted and is pending processing.',
+                                    icon: "📤",
+                                    isCompleted: false,
+                                    isCurrent: true,
+                                },
+                                {
+                                    status: 'payment_completed',
+                                    timestamp: new Date(),
+                                    title: 'Payment Completed',
+                                    description: 'Your payment was successful via Paystack. Order is now submitted for processing.',
+                                    icon: "✅",
+                                    isCompleted: true,
+                                    isCurrent: true,
+                                }
+                            ]
                         }
                     }
                 }
             );
 
             console.log('✅ Order updated via webhook:', reference);
-
-            // TODO: Send confirmation email/SMS to customer
-            // TODO: Trigger order processing workflow
 
         } catch (error) {
             console.log('Error handling successful charge:', error);
@@ -1436,7 +1672,7 @@ class OrderController {
                         'payment.refundRequestedAt': new Date()
                     },
                     $push: {
-                        statusHistory: {
+                        orderInstantHistory: {
                             status: 'refund_requested',
                             timestamp: new Date(),
                             updatedBy: {
@@ -1531,12 +1767,16 @@ class OrderController {
 /**
  * Generate a unique delivery token for S3 uploads
  */
-function generateDeliveryToken() {
+function
+
+generateDeliveryToken() {
     const crypto = require('crypto');
-    return crypto.randomBytes(16).toString('hex');
+    return crypto.randomBytes(3).toString('hex').toUpperCase();
 }
 
-async function payStackInit(payload) {
+async function
+
+payStackInit(payload) {
     try {
         const response = await axios({
             method: "POST",
@@ -1555,4 +1795,5 @@ async function payStackInit(payload) {
     }
 }
 
-module.exports = OrderController;
+module
+    .exports = OrderController;

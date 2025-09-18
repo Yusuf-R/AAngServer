@@ -1,8 +1,8 @@
-// /models/Orders/OrderManagement.js
+// /models/Orders/Order.js
 import mongoose from "mongoose";
 import dbClient from "../database/mongoDB";
 
-const { Schema, model } = mongoose;
+const {Schema, model} = mongoose;
 
 const connectDB = async () => {
     if (mongoose.connection.readyState !== 1) {
@@ -14,7 +14,7 @@ const connectDB = async () => {
 const LocationSchema = new Schema({
     address: {
         type: String,
-        required: function() {
+        required: function () {
             return this.status !== 'draft';
         }
     },
@@ -29,7 +29,7 @@ const LocationSchema = new Schema({
             type: [Number], // [longitude, latitude]
             required: true,
             validate: {
-                validator: function(v) {
+                validator: function (v) {
                     return v.length === 2 &&
                         v[0] >= -180 && v[0] <= 180 &&
                         v[1] >= -90 && v[1] <= 90;
@@ -55,14 +55,14 @@ const LocationSchema = new Schema({
         floor: String,
         unit: String
     }
-}, { _id: false });
+}, {_id: false});
 
 // Package Details Schema
 const PackageSchema = new Schema({
     category: {
         type: String,
         enum: ['document', 'parcel', 'food', 'fragile', 'laptop', 'mobilePhone', 'electronics', 'cake', 'clothing', 'medicine', 'furniture', 'jewelry', 'gifts', 'books', 'others'],
-        required: function() {
+        required: function () {
             return this.status !== 'draft';
         }
     },
@@ -70,14 +70,14 @@ const PackageSchema = new Schema({
         length: Number,
         width: Number,
         height: Number,
-        unit: { type: String, enum: ['cm', 'inch'], default: 'cm' }
+        unit: {type: String, enum: ['cm', 'inch'], default: 'cm'}
     },
     weight: {
         value: Number,
-        unit: { type: String, enum: ['kg', 'g'], default: 'kg' }
+        unit: {type: String, enum: ['kg', 'g'], default: 'kg'}
     },
-    isFragile: { type: Boolean, default: false },
-    requiresSpecialHandling: { type: Boolean, default: false },
+    isFragile: {type: Boolean, default: false},
+    requiresSpecialHandling: {type: Boolean, default: false},
     images: [{
         id: String,
         key: String,
@@ -99,17 +99,17 @@ const PackageSchema = new Schema({
     },
     description: String,
     specialInstructions: String
-}, { _id: false });
+}, {_id: false});
 
 // Cost Calculation Schema
 const PricingSchema = new Schema({
-    baseFare: { type: Number, required: true },
+    baseFare: {type: Number, required: true},
     distanceFare: Number,
     timeFare: Number,
     weightFare: Number,
     priorityFare: Number,
     surcharges: [{
-        type: { type: String },
+        type: {type: String},
         amount: Number,
         reason: String
     }],
@@ -118,31 +118,82 @@ const PricingSchema = new Schema({
         code: String,
         reason: String
     },
-    totalAmount: { type: Number, required: true },
-    currency: { type: String, default: 'NGN' }
-}, { _id: false });
+    totalAmount: {type: Number, required: true},
+    currency: {type: String, default: 'NGN'}
+}, {_id: false});
 
-// Timeline/Status History Schema
-const StatusHistorySchema = new Schema({
-    status: { type: String, required: true },
-    timestamp: { type: Date, default: Date.now },
-    location: {
-        lat: Number,
-        lng: Number,
-        address: String
-    },
+// Timeline/Status History Schema for orderCreation updates till payments
+const OrderCreationHistorySchema = new Schema({
+    status: {type: String, required: true},
+    timestamp: {type: Date, default: Date.now},
     updatedBy: {
-        userId: { type: Schema.Types.ObjectId, ref: 'Base' },
-        role: { type: String, enum: ['client', 'driver', 'admin', 'system'] }
+        userId: {type: Schema.Types.ObjectId, ref: 'Base'},
+        role: {type: String, enum: ['client', 'driver', 'admin', 'system']}
     },
     notes: String,
-    photos: [String], // Proof of delivery photos, etc.
-    signature: String // Digital signature for delivery confirmation
+}, {_id: true});
+
+// OrderTracking schema after from assigning to delivery
+const OrderTrackingHistorySchema = new Schema({
+    status: {
+        type: String,
+        required: true,
+        enum: [
+            'order_created',
+            'order_submitted',
+            'payment_confirmed',
+            'admin_review_started',
+            'admin_review_completed',
+            'driver_assignment_started',
+            'driver_assigned',
+            'en_route_to_pickup',
+            'arrived_at_pickup',
+            'package_picked_up',
+            'in_transit',
+            'arrived_at_destination',
+            'delivery_completed',
+            'delivery_failed',
+            'cancelled'
+        ]
+    },
+    timestamp: { type: Date, default: Date.now },
+    title: { type: String, required: true }, // e.g., "Driver Assigned"
+    description: { type: String }, // e.g., "Michael A. accepted your order"
+    icon: { type: String }, // e.g., "🚗", "✅", "📦"
+
+    // Additional context for the UI
+    metadata: {
+        driverId: { type: Schema.Types.ObjectId, ref: 'Base' },
+        driverName: String,
+        vehicleType: String,
+        vehicleNumber: String,
+        eta: Number, // in minutes
+        distance: Number, // in km
+        location: {
+            lat: Number,
+            lng: Number,
+            address: String
+        },
+        proof: {
+            type: { type: String, enum: ['photo', 'signature', 'secret_verified'] },
+            url: String,
+            verifiedAt: Date
+        }
+    },
+
+    // System info
+    updatedBy: {
+        role: { type: String, default: 'system' },
+        name: { type: String, default: 'AAngLogistics System'},
+    },
+
+    isCompleted: { type: Boolean, default: false },
+    isCurrent: { type: Boolean, default: false }
 }, { _id: true });
 
-// Real-time Tracking Schema
-const TrackingSchema = new Schema({
-    driverId: { type: Schema.Types.ObjectId, ref: 'Base', index: true },
+// Driver Tracking Schema and Assignment
+const DriverAssignedTrackingSchema = new Schema({
+    driverId: {type: Schema.Types.ObjectId, ref: 'Base', index: true},
     driverInfo: {
         name: String,
         phone: String,
@@ -154,7 +205,7 @@ const TrackingSchema = new Schema({
         lat: Number,
         lng: Number,
         accuracy: Number,
-        timestamp: { type: Date, default: Date.now }
+        timestamp: {type: Date, default: Date.now}
     },
     route: [{
         lat: Number,
@@ -175,13 +226,19 @@ const TrackingSchema = new Schema({
     distance: {
         total: Number,
         remaining: Number,
-        unit: { type: String, default: 'km' }
+        unit: {type: String, default: 'km'}
     },
     duration: {
         estimated: Number, // in minutes
         actual: Number
-    }
-}, { _id: false });
+    },
+    status: {
+        type: String,
+        enum: ['assigned', 'accepted', 'rejected', 'cancelled', 'completed']
+    },
+    rejectionReason: String,
+    responseTime: Number,
+}, {_id: false});
 
 // Main Order Schema
 const OrderSchema = new Schema({
@@ -198,7 +255,6 @@ const OrderSchema = new Schema({
         required: true,
         index: true
     },
-
     // Order Type and Priority
     orderType: {
         type: String,
@@ -210,36 +266,59 @@ const OrderSchema = new Schema({
         enum: ['low', 'normal', 'high', 'urgent'],
         default: 'normal'
     },
-
-    // Package Details
-    package: { type: PackageSchema, required: true },
-
-    // Delivery Details
-    location: {
-        pickUp: { type: LocationSchema, required: true },
-        dropOff: { type: LocationSchema, required: true },
-    },
-
     // Scheduling
     scheduledPickup: Date,
-    deliveryWindow: {
-        start: Date,
-        end: Date
+    // Package Details
+    package: {type: PackageSchema, required: true},
+    // Delivery Details
+    location: {
+        pickUp: {type: LocationSchema, required: true},
+        dropOff: {type: LocationSchema, required: true},
     },
-
     // Vehicle Requirements
     vehicleRequirements: {
         type: [String],
         enum: ['bicycle', 'motorcycle', 'tricycle', 'van', 'truck', 'car', 'other'],
         default: []
     },
-
+    // Pricing
+    pricing: PricingSchema,
+    // Payment
+    payment: {
+        method: {
+            type: String,
+            enum: ['Wallet', 'PayStack', 'BankTransfer'],
+            required: true
+        },
+        status: {
+            type: String,
+            enum: ['pending', 'processing', 'paid', 'failed', 'refunded'],
+            default: 'pending'
+        },
+        transactionId: String,
+        amount: Number,
+        currency: {type: String, default: 'NGN'},
+        reference: String,
+        initiatedAt: Date,
+        paidAt: Date,
+        refundedAt: Date,
+        refundReason: String,
+        failureReason: String,
+        paystackData: {
+            type: Schema.Types.Mixed, // Flexible object structure
+            default: null
+        }
+    },
+    deliveryWindow: {
+        start: Date,
+        end: Date
+    },
     // Order Status
     status: {
         type: String,
         enum: [
             'draft',           // Order being created and not yet submitted
-            'submitted',        // Submitted by client and paid
+            'submitted',       // Submitted by client and paid
             'admin_review',    // Under admin review
             'admin_approved',  // Approved by admin
             'admin_rejected',  // Rejected by admin
@@ -260,46 +339,19 @@ const OrderSchema = new Schema({
         default: 'draft',
         index: true
     },
-
-    // Pricing
-    pricing: PricingSchema,
-
-    // Payment
-    payment: {
-        method: {
-            type: String,
-            enum: ['Wallet', 'PayStack', 'BankTransfer'],
-            required: true
-        },
-        status: {
-            type: String,
-            enum: ['pending', 'processing', 'paid', 'failed', 'refunded'],
-            default: 'pending'
-        },
-        transactionId: String,
-        amount: Number,
-        currency: { type: String, default: 'NGN' },
-        reference: String,
-        initiatedAt: Date,
-        paidAt: Date,
-        refundedAt: Date,
-        refundReason: String
-    },
-
     deliveryToken: {
         type: String,
         required: true,
         select: false // Prevent accidental exposure
     },
     tokenVerified: {
-        verified: { type: Boolean, default: false },
+        verified: {type: Boolean, default: false},
         verifiedAt: Date,
         verifiedBy: {
             name: String,
             phone: String
         }
     },
-
     pickupConfirmation: {
         confirmedBy: {
             name: String,
@@ -309,7 +361,6 @@ const OrderSchema = new Schema({
         photos: [String],
         signature: String
     },
-
     deliveryConfirmation: {
         photos: [String],
         videos: [String],
@@ -321,33 +372,24 @@ const OrderSchema = new Schema({
         verifiedAt: Date
     },
 
-    // Tracking and Assignment
-    tracking: TrackingSchema,
+    // from instantiation to payment
+    orderInstantHistory: [OrderCreationHistorySchema],
 
-    // Driver Assignment History
-    assignmentHistory: [{
-        driverId: { type: Schema.Types.ObjectId, ref: 'Base' },
-        assignedAt: { type: Date, default: Date.now },
-        status: {
-            type: String,
-            enum: ['assigned', 'accepted', 'rejected', 'cancelled', 'completed']
-        },
-        rejectionReason: String,
-        responseTime: Number // in seconds
-    }],
+    // from assignment to delivery
+    orderTrackingHistory: [OrderTrackingHistorySchema],
 
-    // Status History
-    statusHistory: [StatusHistorySchema],
+    // driver Tracking and Assignment
+    driverAssignment: DriverAssignedTrackingSchema,
 
     // Rating and Feedback
     rating: {
         clientRating: {
-            stars: { type: Number, min: 1, max: 5 },
+            stars: {type: Number, min: 1, max: 5},
             feedback: String,
             ratedAt: Date
         },
         driverRating: {
-            stars: { type: Number, min: 1, max: 5 },
+            stars: {type: Number, min: 1, max: 5},
             feedback: String,
             ratedAt: Date
         }
@@ -355,16 +397,16 @@ const OrderSchema = new Schema({
 
     // Communication
     communications: [{
-        type: { type: String, enum: ['sms', 'call', 'push', 'email'] },
+        type: {type: String, enum: ['sms', 'call', 'push', 'email']},
         recipient: String,
         content: String,
-        sentAt: { type: Date, default: Date.now },
-        status: { type: String, enum: ['sent', 'delivered', 'failed'] }
+        sentAt: {type: Date, default: Date.now},
+        status: {type: String, enum: ['sent', 'delivered', 'failed']}
     }],
 
     // Insurance and Liability
     insurance: {
-        isInsured: { type: Boolean, default: false },
+        isInsured: {type: Boolean, default: false},
         declaredValue: Number,
         coverage: Number,
         provider: String,
@@ -373,17 +415,17 @@ const OrderSchema = new Schema({
 
     // Special Flags
     flags: {
-        isUrgent: { type: Boolean, default: false },
-        requiresProofOfDelivery: { type: Boolean, default: true },
-        allowDriverSubstitution: { type: Boolean, default: true },
-        isRecurring: { type: Boolean, default: false },
-        isHighValue: { type: Boolean, default: false }
+        isUrgent: {type: Boolean, default: false},
+        requiresProofOfDelivery: {type: Boolean, default: true},
+        allowDriverSubstitution: {type: Boolean, default: true},
+        isRecurring: {type: Boolean, default: false},
+        isHighValue: {type: Boolean, default: false}
     },
 
     // Metadata
     metadata: {
-        createdBy: { type: String, enum: ['client', 'admin', 'system'], default: 'client' },
-        channel: { type: String, enum: ['mobile', 'web', 'api'], default: 'mobile' },
+        createdBy: {type: String, enum: ['client', 'admin', 'system'], default: 'client'},
+        channel: {type: String, enum: ['mobile', 'web', 'api'], default: 'mobile'},
         sourceIP: String,
         userAgent: String,
         referenceNumber: String, // External system reference
@@ -391,18 +433,18 @@ const OrderSchema = new Schema({
 
         // Add draft progress tracking
         draftProgress: {
-            step: { type: Number, default: 1 }, // Current step (1-7)
-            completedSteps: [{ type: Number }], // Array of completed step numbers
-            lastUpdated: { type: Date, default: Date.now },
+            step: {type: Number, default: 0}, // Current step (0-4)
+            completedSteps: [{type: Number}], // Array of completed step numbers
+            lastUpdated: {type: Date, default: Date.now},
             completedAt: Date, // When all steps were completed
 
             // Track form field completion for better UX
             fieldCompletion: {
-                location: { type: Boolean, default: false },
-                package: { type: Boolean, default: false },
-                vehicleRequirements: { type: Boolean, default: false },
-                payment: { type: Boolean, default: false },
-                review: { type: Boolean, default: false }
+                location: {type: Boolean, default: false},
+                package: {type: Boolean, default: false},
+                vehicleRequirements: {type: Boolean, default: false},
+                review: {type: Boolean, default: false},
+                payment: {type: Boolean, default: false},
             }
         }
     },
@@ -410,7 +452,7 @@ const OrderSchema = new Schema({
     // Cancellation
     cancellation: {
         reason: String,
-        cancelledBy: { type: Schema.Types.ObjectId, ref: 'Base' },
+        cancelledBy: {type: Schema.Types.ObjectId, ref: 'Base'},
         cancelledAt: Date,
         refundAmount: Number,
         cancellationFee: Number
@@ -422,68 +464,53 @@ const OrderSchema = new Schema({
 });
 
 // Indexes for Performance
-OrderSchema.index({ clientId: 1, status: 1 });
-OrderSchema.index({ 'tracking.driverId': 1, status: 1 });
-OrderSchema.index({ status: 1, createdAt: -1 });
-OrderSchema.index({ orderType: 1, scheduledPickup: 1 });
-OrderSchema.index({ 'location.pickUp.coordinates': '2dsphere' });
-OrderSchema.index({ 'location.dropOff.coordinates': '2dsphere' });
-OrderSchema.index({ createdAt: -1 });
+OrderSchema.index({clientId: 1, status: 1});
+OrderSchema.index({'tracking.driverId': 1, status: 1});
+OrderSchema.index({status: 1, createdAt: -1});
+OrderSchema.index({orderType: 1, scheduledPickup: 1});
+OrderSchema.index({'location.pickUp.coordinates': '2dsphere'});
+OrderSchema.index({'location.dropOff.coordinates': '2dsphere'});
+OrderSchema.index({createdAt: -1});
 
 // Virtual for order age
-OrderSchema.virtual('orderAge').get(function() {
+OrderSchema.virtual('orderAge').get(function () {
     return Date.now() - this.createdAt.getTime();
 });
 
 // Virtual for estimated delivery time
-OrderSchema.virtual('estimatedDeliveryTime').get(function() {
+OrderSchema.virtual('estimatedDeliveryTime').get(function () {
     if (this.tracking && this.tracking.estimatedArrival) {
         return this.tracking.estimatedArrival.dropoff;
     }
     return null;
 });
-
-// Pre-save middleware
-OrderSchema.pre('save', function(next) {
-    // Generate order reference if not exists
+OrderSchema.pre('save', function (next) {
+    // Only keep the order reference generation
     if (!this.orderRef) {
         this.orderRef = generateOrderRef();
     }
-
-    // Update status history
-    if (this.isModified('status')) {
-        this.statusHistory.push({
-            status: this.status,
-            timestamp: new Date(),
-            updatedBy: {
-                userId: this.metadata?.updatedBy || null,
-                role: this.metadata?.updatedByRole || 'system'
-            }
-        });
-    }
-
     next();
 });
 
 // Static methods
-OrderSchema.statics.findActiveOrders = function() {
+OrderSchema.statics.findActiveOrders = function () {
     return this.find({
-        status: { $in: ['pending', 'assigned', 'confirmed', 'picked_up', 'in_transit'] }
+        status: {$in: ['pending', 'assigned', 'confirmed', 'picked_up', 'in_transit']}
     });
 };
 
-OrderSchema.statics.findOrdersForDriver = function(driverId) {
+OrderSchema.statics.findOrdersForDriver = function (driverId) {
     return this.find({
         'tracking.driverId': driverId,
-        status: { $in: ['assigned', 'confirmed', 'picked_up', 'in_transit'] }
+        status: {$in: ['assigned', 'confirmed', 'picked_up', 'in_transit']}
     });
 };
 
-OrderSchema.statics.findNearbyOrders = function(lat, lng, maxDistance = 10000) {
+OrderSchema.statics.findNearbyOrders = function (lat, lng, maxDistance = 10000) {
     return this.find({
         'location.pickUp.coordinates': {
             $near: {
-                $geometry: { type: 'Point', coordinates: [lng, lat] },
+                $geometry: {type: 'Point', coordinates: [lng, lat]},
                 $maxDistance: maxDistance
             }
         },
@@ -491,34 +518,34 @@ OrderSchema.statics.findNearbyOrders = function(lat, lng, maxDistance = 10000) {
     });
 };
 
-OrderSchema.statics.getOrderStats = async function(clientId) {
-    const matchStage = clientId ? { clientId: new mongoose.Types.ObjectId(clientId) } : {};
+OrderSchema.statics.getOrderStats = async function (clientId) {
+    const matchStage = clientId ? {clientId: new mongoose.Types.ObjectId(clientId)} : {};
 
     const pipeline = [
-        { $match: matchStage },
+        {$match: matchStage},
         {
             $group: {
                 _id: {
                     $cond: [
-                        { $in: ["$status", ["delivered"]] },
+                        {$in: ["$status", ["delivered"]]},
                         "completed",
                         {
                             $cond: [
-                                { $in: ["$status", ["pending", "assigned", "confirmed", "picked_up", "in_transit"]] },
+                                {$in: ["$status", ["pending", "assigned", "confirmed", "picked_up", "in_transit"]]},
                                 "active",
                                 "other"
                             ]
                         }
                     ]
                 },
-                count: { $sum: 1 }
+                count: {$sum: 1}
             }
         }
     ];
 
     const results = await this.aggregate(pipeline);
 
-    const stats = { total: 0, active: 0, completed: 0 };
+    const stats = {total: 0, active: 0, completed: 0};
 
     results.forEach(entry => {
         if (entry._id === "active") stats.active = entry.count;
@@ -529,9 +556,9 @@ OrderSchema.statics.getOrderStats = async function(clientId) {
     return stats;
 };
 
-OrderSchema.statics.getOrderHistory = async function(clientId, limit = 10) {
-    const orders = await this.find({ clientId })
-        .sort({ createdAt: -1 })
+OrderSchema.statics.getOrderHistory = async function (clientId, limit = 10) {
+    const orders = await this.find({clientId})
+        .sort({createdAt: -1})
         .limit(limit)
         .select([
             '_id',
@@ -556,14 +583,14 @@ OrderSchema.statics.getOrderHistory = async function(clientId, limit = 10) {
 
 // Order Assignment Schema - Separate collection for managing driver assignments
 const OrderAssignmentSchema = new Schema({
-    orderId: { type: Schema.Types.ObjectId, ref: 'Order', required: true },
+    orderId: {type: Schema.Types.ObjectId, ref: 'Order', required: true},
     availableDrivers: [{
-        driverId: { type: Schema.Types.ObjectId, ref: 'Base', required: true },
+        driverId: {type: Schema.Types.ObjectId, ref: 'Base', required: true},
         distance: Number,
         estimatedArrival: Number,
-        notifiedAt: { type: Date, default: Date.now },
-        responded: { type: Boolean, default: false },
-        response: { type: String, enum: ['accepted', 'rejected'] },
+        notifiedAt: {type: Date, default: Date.now},
+        responded: {type: Boolean, default: false},
+        response: {type: String, enum: ['accepted', 'rejected']},
         responseTime: Number,
         rejectionReason: String
     }],
@@ -572,15 +599,15 @@ const OrderAssignmentSchema = new Schema({
         enum: ['nearest', 'fastest', 'rating_based', 'round_robin'],
         default: 'nearest'
     },
-    broadcastRadius: { type: Number, default: 5000 }, // in meters
-    maxDrivers: { type: Number, default: 10 },
-    timeoutDuration: { type: Number, default: 300 }, // 5 minutes in seconds
+    broadcastRadius: {type: Number, default: 5000}, // in meters
+    maxDrivers: {type: Number, default: 10},
+    timeoutDuration: {type: Number, default: 300}, // 5 minutes in seconds
     status: {
         type: String,
         enum: ['broadcasting', 'assigned', 'failed', 'cancelled'],
         default: 'broadcasting'
     },
-    assignedDriverId: { type: Schema.Types.ObjectId, ref: 'Base' },
+    assignedDriverId: {type: Schema.Types.ObjectId, ref: 'Base'},
     assignedAt: Date,
     failureReason: String
 }, {
@@ -588,9 +615,9 @@ const OrderAssignmentSchema = new Schema({
     collection: 'order_assignments'
 });
 
-OrderAssignmentSchema.index({ orderId: 1 });
-OrderAssignmentSchema.index({ 'availableDrivers.driverId': 1 });
-OrderAssignmentSchema.index({ status: 1, createdAt: 1 });
+OrderAssignmentSchema.index({orderId: 1});
+OrderAssignmentSchema.index({'availableDrivers.driverId': 1});
+OrderAssignmentSchema.index({status: 1, createdAt: 1});
 
 // Utility function to generate order reference
 function generateOrderRef() {
@@ -622,8 +649,8 @@ const getOrderModels = async () => {
     const Order = mongoose.models.Order || model('Order', OrderSchema);
     const OrderAssignment = mongoose.models.OrderAssignment || model('OrderAssignment', OrderAssignmentSchema);
 
-    return { Order, OrderAssignment };
+    return {Order, OrderAssignment};
 };
 
 export default getOrderModels;
-export { generateOrderRef };
+export {generateOrderRef};
