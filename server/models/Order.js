@@ -342,7 +342,7 @@ const OrderSchema = new Schema({
     deliveryToken: {
         type: String,
         required: true,
-        select: false // Prevent accidental exposure
+        // select: false // Prevent accidental exposure
     },
     tokenVerified: {
         verified: {type: Boolean, default: false},

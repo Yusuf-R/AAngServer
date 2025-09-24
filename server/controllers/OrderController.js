@@ -164,8 +164,8 @@ class OrderController {
                     title: 'Order Created',
                     description: 'Your order has been created and is currently in draft status.',
                     icon: '📦',
-                    isCompleted: false,
-                    isCurrent: true,
+                    isCompleted: true,
+                    isCurrent: false,
                 }]
             });
 
@@ -283,8 +283,8 @@ class OrderController {
                     title: 'Order Created',
                     description: 'Your order has been created and is currently in draft status.',
                     icon: '📦',
-                    isCompleted: false,
-                    isCurrent: true,
+                    isCompleted: true,
+                    isCurrent: false,
                 }]
             });
 
@@ -934,10 +934,6 @@ class OrderController {
             try {
                 const verification = await verifyPayStackTransaction(reference);
                 const verificationData = verification.data;
-                console.log({
-                    verificationData,
-                    verification
-                })
 
                 if (verificationData.status === 'success') {
                     // Verify amount
@@ -999,14 +995,16 @@ class OrderController {
                                             description: 'Your payment was successful via callback. Order is now submitted for processing.',
                                             icon: "✅",
                                             isCompleted: true,
-                                            isCurrent: true,
+                                            isCurrent: false,
                                         },
 
                                     ]
                                 }
                             }
                         },
-                        {new: true}
+                        {
+                            new: true,
+                        }
                     );
                     // send notification if not existing
                     const [existingOrderNotification, existingPaymentNotification] = await Promise.all([
@@ -1256,13 +1254,15 @@ class OrderController {
                                             description: 'Your payment was successful via Paystack. Order is now submitted for processing.',
                                             icon: "✅",
                                             isCompleted: true,
-                                            isCurrent: true,
+                                            isCurrent: false,
                                         }
                                     ]
                                 }
                             }
                         },
-                        {new: true}
+                        {
+                            new: true,
+                        }
                     );
 
                     if (updatedOrder) {
@@ -1570,12 +1570,12 @@ class OrderController {
                                     description: 'Your payment was successful via Paystack. Order is now submitted for processing.',
                                     icon: "✅",
                                     isCompleted: true,
-                                    isCurrent: true,
+                                    isCurrent: false,
                                 }
                             ]
                         }
                     }
-                }
+                },
             );
 
             console.log('✅ Order updated via webhook:', reference);
