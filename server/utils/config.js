@@ -11,6 +11,8 @@ class SecurityConfig {
             origin: [
                 "http://localhost:5000",
                 "http://localhost:8081",
+                'http://localhost:3000',  // Next.js dev server
+                'http://127.0.0.1:3000',  // Alternative localhost
                 "*",
             ],
             methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',

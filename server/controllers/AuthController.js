@@ -2512,6 +2512,33 @@ class AuthController {
             res.status(500).json({ error: 'Could not generate signature' });
         }
     }
+
+    // In AuthController
+    static async verifyNextAuthSession(webSessionToken) {
+        try {
+            // The webSessionToken should be the JWT from NextAuth
+            const decoded = jwt.verify(webSessionToken, process.env.SOCKET_SECRET);
+
+            // NextAuth typically stores user ID in 'sub' claim
+            const userId = decoded.sub || decoded.id;
+
+            if (!userId) {
+                throw new Error('Invalid session token: no user ID');
+            }
+
+            const { AAngBase } = await getModels();
+            const user = await AAngBase.findById(userId);
+
+            if (!user) {
+                throw new Error('User not found');
+            }
+
+            return user;
+        } catch (error) {
+            console.error('NextAuth session verification failed:', error);
+            throw new Error('Invalid or expired session');
+        }
+    }
 }
 
 export default AuthController;

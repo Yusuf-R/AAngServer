@@ -153,12 +153,21 @@ const OrderTrackingHistorySchema = new Schema({
             'arrived_at_destination',
             'delivery_completed',
             'delivery_failed',
-            'cancelled'
+            'cancelled',
+            'system_admin_rejected'
         ]
     },
     timestamp: { type: Date, default: Date.now },
     title: { type: String, required: true }, // e.g., "Driver Assigned"
     description: { type: String }, // e.g., "Michael A. accepted your order"
+    reason:{
+        paymentVerified: {type: Boolean, default: false},
+        dataIntegrity: {type: Boolean, default: false},
+        driverAssignment: {type: Boolean, default: false},
+        driverAcceptance: {type: Boolean, default: false},
+        contraBandItems: {type: Boolean, default: false},
+        reversalNote: String
+    },
     icon: { type: String }, // e.g., "🚗", "✅", "📦"
 
     // Additional context for the UI
@@ -466,11 +475,9 @@ const OrderSchema = new Schema({
 // Indexes for Performance
 OrderSchema.index({clientId: 1, status: 1});
 OrderSchema.index({'tracking.driverId': 1, status: 1});
-OrderSchema.index({status: 1, createdAt: -1});
 OrderSchema.index({orderType: 1, scheduledPickup: 1});
 OrderSchema.index({'location.pickUp.coordinates': '2dsphere'});
 OrderSchema.index({'location.dropOff.coordinates': '2dsphere'});
-OrderSchema.index({createdAt: -1});
 
 // Virtual for order age
 OrderSchema.virtual('orderAge').get(function () {
@@ -591,8 +598,10 @@ const OrderAssignmentSchema = new Schema({
         notifiedAt: {type: Date, default: Date.now},
         responded: {type: Boolean, default: false},
         response: {type: String, enum: ['accepted', 'rejected']},
+        respondedAt: Date,
         responseTime: Number,
-        rejectionReason: String
+        rejectionReason: String,
+        cooldownExpiry: Date,
     }],
     assignmentStrategy: {
         type: String,
@@ -618,6 +627,9 @@ const OrderAssignmentSchema = new Schema({
 OrderAssignmentSchema.index({orderId: 1});
 OrderAssignmentSchema.index({'availableDrivers.driverId': 1});
 OrderAssignmentSchema.index({status: 1, createdAt: 1});
+OrderSchema.index({ status: 1, createdAt: -1 });
+OrderSchema.index({ "payment.status": 1 });
+OrderSchema.index({ createdAt: -1 });
 
 // Utility function to generate order reference
 function generateOrderRef() {

@@ -38,8 +38,13 @@ const server = http.createServer(app);
 // 🔌 Setup socket.io server
 const io = new Server(server, {
     cors: {
-        origin: '*',
+        origin: [
+            'http://localhost:3000',  // Next.js dev server
+            'http://127.0.0.1:3000',  // Alternative localhost
+            '*'
+        ].filter(Boolean),
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+        credentials: true
     }
 });
 
@@ -48,28 +53,39 @@ global.io = io;
 
 // 🔐 Middleware for socket authentication
 io.use(async (socket, next) => {
-    const token = socket.handshake.auth?.token;
+    const { token, clientType } = socket.handshake.auth || {};
 
-    // Allow anonymous mode for health pings or public rooms
     if (!token) {
         socket.userId = null;
         socket.isAnonymous = true;
-        return next(); // allow limited functionality
+        return next();
     }
 
-    // Try to verify the token
     try {
-        const user = await AuthController.verifySocketAccessToken(token);
-        if (!user || !user._id) {
+        let user;
+
+        if (clientType === 'web') {
+            // Web: use SOCKET_SECRET
+            user = await AuthController.verifyNextAuthSession(token);
+        } else {
+            // Assume mobile (or legacy): use JWT_ACCESS_SECRET
+            user = await AuthController.verifySocketAccessToken(token);
+        }
+
+        if (!user?._id) {
             return next(new Error('User not found or unauthorized'));
         }
 
-        // Bind user data to socket
         socket.userId = user._id.toString();
         socket.isAnonymous = false;
+        socket.clientType = clientType || 'mobile';
+        socket.userRole = user.role;
+        socket.isAdmin = user.role === 'Admin';
+        socket.adminRole = user?.adminRole || null;
         next();
     } catch (err) {
-        return next(new Error('Authentication failed: ' + err.message));
+        console.error('Socket auth failed:', err.message);
+        return next(new Error('Authentication failed'));
     }
 });
 
@@ -86,6 +102,38 @@ io.on('connection', (socket) => {
 
         return; // exit early for anonymous clients
     }
+
+    // Admin testing events
+    socket.on('admin:test-notification', (data) => {
+        console.log('Admin test notification:', data);
+        // Echo back to admin or broadcast to relevant users
+        socket.emit('notification:new', {
+            ...data,
+            from: 'system',
+            type: 'test'
+        });
+    });
+
+    socket.on('admin:broadcast', (data) => {
+        if (!socket.isAdmin && socket.userRole !== 'Admin') {
+            return socket.emit('error', { message: 'Unauthorized' });
+        }
+
+        console.log('Admin broadcasting:', data);
+
+        // Broadcast to all connected sockets except sender
+        socket.broadcast.emit('broadcast:message', {
+            ...data,
+            from: socket.userId,
+            sentAt: new Date()
+        });
+
+        // Confirm to sender
+        socket.emit('broadcast:confirmed', {
+            recipients: io.sockets.sockets.size - 1,
+            ...data
+        });
+    });
 
     // 👤 Authenticated user socket
     console.log(`✅ Authenticated socket connected: ${socket.userId}`);

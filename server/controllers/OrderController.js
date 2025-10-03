@@ -22,8 +22,24 @@ const PAYMENT_STATUS = {
 const ORDER_STATUS = {
     DRAFT: 'draft',
     SUBMITTED: 'submitted',
-    CONFIRMED: 'confirmed',
-    CANCELLED: 'cancelled'
+    PAID: 'paid',
+    ADMIN_REVIEW:'admin_review',
+    ADMIN_APPROVED:'admin_approved',
+    ADMIN_REJECTED:'admin_rejected',
+    PENDING:'pending',
+    BROADCAST:'broadcast',
+    ASSIGNED:'assigned',
+    CONFIRMED:'confirmed',
+    DRIVER_EN_ROUTE_PICKUP:'en_route_pickup',
+    DRIVER_ARRIVED_PICKUP:'arrived_pickup',  // Driver at pickup location
+    DRIVER_PICKED_UP:'picked_up',
+    DRIVER_IN_TRANSIT:'in_transit',
+    DRIVER_ARRIVED_DROPOFF:'arrived_dropoff',
+    DRIVER_DELIVERED:'delivered',
+    DELIVERY_FAILED:'failed',
+    DELIVERY_CANCELLED:'cancelled',
+    DELIVERY_RETURNED:'returned',
+    CANCELLED: 'cancelled',
 };
 
 // PayStack verification utility
@@ -478,11 +494,6 @@ class OrderController {
             const frontendTotal = orderData.pricing?.totalAmount;
 
             const frontendInsurance = orderData.insurance;
-
-            console.log({
-                frontendTotal,
-                frontendInsurance
-            })
 
             // Prepare data for BE calculation
             const pricingInput = {
@@ -969,7 +980,7 @@ class OrderController {
                             },
                             $push: {
                                 orderInstantHistory: {
-                                    status: ORDER_STATUS.CONFIRMED,
+                                    status: ORDER_STATUS.PAID,
                                     timestamp: new Date(),
                                     updatedBy: {
                                         userId: order.clientId,
@@ -1217,7 +1228,7 @@ class OrderController {
                                 'payment.status': PAYMENT_STATUS.PAID,
                                 'payment.paidAt': new Date(),
                                 'payment.paystackData': verificationData,
-                                'status': ORDER_STATUS.CONFIRMED,
+                                'status': ORDER_STATUS.PAID,
                                 'metadata.draftProgress.step': 4,
                                 'metadata.draftProgress.fieldCompletion.payment': true,
                                 'metadata.draftProgress.completedAt': new Date(),
@@ -1228,7 +1239,7 @@ class OrderController {
                             },
                             $push: {
                                 orderInstantHistory: {
-                                    status: ORDER_STATUS.CONFIRMED,
+                                    status: ORDER_STATUS.PAID,
                                     timestamp: new Date(),
                                     updatedBy: {
                                         userId: clientId,

@@ -26,9 +26,6 @@ class UserController {
         if (!address || !dob || !fullName || !gender || !lga || !state || !phoneNumber) {
             return res.status(400).json({error: "All fields are required."});
         }
-        console.log({
-            data: req.body
-        })
 
         // run the update logic with validation
         try {
@@ -197,7 +194,6 @@ class UserController {
             const updatedUser = await AAngBase.findOneAndUpdate(
                 {
                     _id: userData._id,
-                    role: 'Client' // Ensure we're updating a client
                 },
                 {
                     $push: {
@@ -276,7 +272,7 @@ class UserController {
             }
             const {AAngBase} = await getModels();
             const updatedUser = await AAngBase.findOneAndUpdate(
-                { _id: userData._id, 'savedLocations._id': locationData._id, role: 'Client' },
+                { _id: userData._id, 'savedLocations._id': locationData._id },
                 { $set: {'savedLocations.$': locationData }},
                 { new: true }
             );
