@@ -13,6 +13,7 @@ const connectDB = async () => {
 const baseOptions = {
     discriminatorKey: "role",
     timestamps: true,
+    strictPopulate: false
 };
 
 const AuthMethodSchema = new Schema({
@@ -30,7 +31,7 @@ const AuthMethodSchema = new Schema({
         type: Date,
         default: Date.now
     }
-}, {_id: false});
+}, {_id: false, strictPopulate: false});
 const GoogleCredentialsSchema = new Schema({
     googleId: {
         type: String,
@@ -79,10 +80,12 @@ const LocationSchema = new Schema({
         floor: String,
         unit: String
     }
-}, {_id: true});
+}, {_id: true, strictPopulate: false});
 // Enhanced Client Schema
 const ClientSchema = new Schema({
-   // User Preferences
+    // savedLocations: {type: [LocationSchema], default: []},
+
+    // User Preferences
     preferences: {
         notifications: {
             orderUpdates: {type: Boolean, default: true},
@@ -172,7 +175,7 @@ const DriverSchema = new Schema({
         timestamp: {type: Date, default: Date.now},
         address: String,
         isMoving: {type: Boolean, default: false},
-        zone: String // operational zone/region
+        zone: String
     },
 
     // Vehicle & Equipment Details
@@ -561,6 +564,7 @@ const AdminSchema = new Schema({
     }
 }, {
     timestamps: true,
+    strictPopulate: false,
     toJSON: {virtuals: true},
     toObject: {virtuals: true}
 });
@@ -660,6 +664,16 @@ const AAngSchema = new Schema({
                 default: {}
             }
         }
+    },
+    expoPushToken: {
+        type: String,
+        sparse: true,
+        index: true
+    },
+    pushTokenStatus: {
+        valid: { type: Boolean, default: true },
+        lastVerified: Date,
+        failureCount: { type: Number, default: 0 }
     },
     sessionTokens: [{
         token: String,
@@ -776,6 +790,8 @@ AAngSchema.index({ phoneNumber: 1 });
 AAngSchema.index({ status: 1 });
 AAngSchema.index({ role: 1 });
 AAngSchema.index({ savedLocations: 1 });
+AAngSchema.index({ 'sessionTokens.lastActive': 1 });
+AAngSchema.index({ 'sessionTokens._id': 1 });
 
 // Client schema indexes
 ClientSchema.index({ 'trustScore.score': 1 });

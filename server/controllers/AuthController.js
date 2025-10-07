@@ -12,7 +12,7 @@ import nodemailer from 'nodemailer';
 import {UAParser} from 'ua-parser-js';
 import MailClient from '../utils/mailer';
 import {logInSchema, resetPasswordSchema, signUpSchema, validateSchema} from "../validators/validateAuth";
-import { cloudinary } from '../utils/cloudinary'
+import {cloudinary} from '../utils/cloudinary'
 import getOrderModels from "../models/Order";
 import order from "../models/Order";
 
@@ -58,6 +58,126 @@ class AuthController {
         } catch (error) {
             console.error('Connection check error:', error);
             return res.status(500).json({error: 'Failed to check connections'});
+        }
+    }
+
+    // Backend Controller
+    static async updatePushToken(req, res) {
+        try {
+            // Perform API pre-check
+            const preCheckResult = await AuthController.apiPreCheck(req);
+
+            if (!preCheckResult.success) {
+                return res.status(preCheckResult.statusCode).json({
+                    error: preCheckResult.error,
+                    ...(preCheckResult.tokenExpired && {tokenExpired: true})
+                });
+            }
+
+            const {expoPushToken} = req.body;
+            if (!expoPushToken) {
+                return res.status(400).json({error: 'Missing push token'});
+            }
+
+            // Validate Expo push token format
+            if (!expoPushToken.startsWith('ExponentPushToken[') || !expoPushToken.endsWith(']')) {
+                return res.status(400).json({error: 'Invalid push token format'});
+            }
+
+            const {userId} = preCheckResult;
+            const {AAngBase} = await getModels();
+
+            // Check if token already exists and is the same
+            const existingUser = await AAngBase.findById(userId);
+
+            if (existingUser?.expoPushToken === expoPushToken) {
+                // Token unchanged, just update last verified date
+                await AAngBase.updateOne(
+                    {_id: userId},
+                    {
+                        $set: {
+                            'pushTokenStatus.lastVerified': new Date(),
+                            'pushTokenStatus.valid': true
+                        }
+                    }
+                );
+
+                return res.status(200).json({
+                    success: true,
+                    message: 'Push token verified (unchanged)',
+                    tokenUnchanged: true
+                });
+            }
+
+            // Token is new or changed, update everything
+            await AAngBase.updateOne(
+                {_id: userId},
+                {
+                    $set: {
+                        expoPushToken,
+                        'pushTokenStatus.valid': true,
+                        'pushTokenStatus.lastVerified': new Date(),
+                        'pushTokenStatus.failureCount': 0
+                    }
+                }
+            );
+
+            console.log(`✅ Push token updated for user ${userId}`);
+
+            return res.status(200).json({
+                success: true,
+                message: 'Push token updated successfully',
+                tokenUpdated: true
+            });
+
+        } catch (error) {
+            console.error('Error updating push token:', error);
+            return res.status(500).json({error: 'Failed to update push token'});
+        }
+    }
+
+    /**
+     * Mark a push token as invalid (call this when Expo returns an error)
+     */
+    static async markTokenAsInvalid(userId) {
+        try {
+            const {AAngBase} = await getModels();
+
+            await AAngBase.updateOne(
+                {_id: userId},
+                {
+                    $set: {
+                        'pushTokenStatus.valid': false,
+                        'pushTokenStatus.lastVerified': new Date()
+                    },
+                    $inc: {
+                        'pushTokenStatus.failureCount': 1
+                    }
+                }
+            );
+
+            console.log(`❌ Marked push token as invalid for user ${userId}`);
+        } catch (error) {
+            console.error('Error marking token as invalid:', error);
+        }
+    }
+
+    /**
+     * Get users with valid push tokens for sending notifications
+     */
+    static async getUsersWithValidTokens(userIds) {
+        try {
+            const {AAngBase} = await getModels();
+
+            return await AAngBase.find({
+                _id: {$in: userIds},
+                expoPushToken: {$exists: true, $ne: null},
+                'pushTokenStatus.valid': true
+            }).select('_id expoPushToken');
+
+        } catch (error) {
+            console.error('Error getting users with valid tokens:', error);
+            return [];
         }
     }
 
@@ -778,7 +898,7 @@ class AuthController {
                 throw new Error('Invalid access token payload');
             }
 
-            const { AAngBase } = await getModels();
+            const {AAngBase} = await getModels();
             const user = await AAngBase.findById(decoded.id);
 
             if (!user) {
@@ -1026,7 +1146,6 @@ class AuthController {
      * User login with credentials
      */
     static async logIn(req, res) {
-        console.log('trying to login');
         const {email, password,} = req.body;
 
         if (!email || !password) {
@@ -1276,12 +1395,12 @@ class AuthController {
      * Generates a strong uppercase alphanumeric OTP.
      * Always includes at least 2 letters and 2 digits in a single pass.
      */
-    static generateVerificationToken({ length = 6, numericOnly = false } = {}) {
+    static generateVerificationToken({length = 6, numericOnly = false} = {}) {
         const digits = '0123456789';
         const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
         if (numericOnly) {
-            return Array.from({ length }, () => digits[Math.floor(Math.random() * digits.length)]).join('');
+            return Array.from({length}, () => digits[Math.floor(Math.random() * digits.length)]).join('');
         }
 
         if (length < 4) {
@@ -1290,8 +1409,8 @@ class AuthController {
 
         // 2 letters
         const tokenParts = [
-            ...Array.from({ length: 2 }, () => letters[Math.floor(Math.random() * letters.length)]),
-            ...Array.from({ length: 2 }, () => digits[Math.floor(Math.random() * digits.length)])
+            ...Array.from({length: 2}, () => letters[Math.floor(Math.random() * letters.length)]),
+            ...Array.from({length: 2}, () => digits[Math.floor(Math.random() * digits.length)])
         ];
 
         // Fill remaining with mixed letters/digits
@@ -2341,7 +2460,7 @@ class AuthController {
             });
         }
 
-        const { acceptedTcs } = req.body;
+        const {acceptedTcs} = req.body;
         if (typeof acceptedTcs !== 'boolean') {
             return res.status(400).json({error: 'acceptedTcs must be a boolean'});
         }
@@ -2376,10 +2495,10 @@ class AuthController {
         }
     }
 
-    static async userDashBoardData(userObject, flag=null) {
+    static async userDashBoardData(userObject, flag = null) {
         let orderData;
         const {AAngBase} = await getModels();
-        const {Order } = await getOrderModels();
+        const {Order} = await getOrderModels();
         const user = await AAngBase.findById(userObject._id);
 
         if (flag) {
@@ -2421,7 +2540,7 @@ class AuthController {
             lga: user.lga || null,
             dob: user.dob ? new Date(user.dob).toISOString() : null,
             fullName: user.fullName || null,
-            gender : user.gender || null,
+            gender: user.gender || null,
             phoneNumber: user.phoneNumber || null,
             authPin: user.authPin ? {
                 isEnabled: user.authPin.isEnabled || null,
@@ -2504,12 +2623,12 @@ class AuthController {
             res.status(200).json({
                 timestamp,
                 signature,
-                public_id : publicId,
+                public_id: publicId,
                 api_key
             });
         } catch (err) {
             console.error('Signature error:', err.message);
-            res.status(500).json({ error: 'Could not generate signature' });
+            res.status(500).json({error: 'Could not generate signature'});
         }
     }
 
@@ -2526,7 +2645,7 @@ class AuthController {
                 throw new Error('Invalid session token: no user ID');
             }
 
-            const { AAngBase } = await getModels();
+            const {AAngBase} = await getModels();
             const user = await AAngBase.findById(userId);
 
             if (!user) {

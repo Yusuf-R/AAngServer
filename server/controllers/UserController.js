@@ -165,6 +165,7 @@ class UserController {
     // Enhanced Location CRUD operations
 
     static async createLocation(req, res) {
+        console.log('I was called');
         // Perform API pre-check
         const preCheckResult = await AuthController.apiPreCheck(req);
 
@@ -177,6 +178,9 @@ class UserController {
 
         const {userData} = preCheckResult;
         const locationData = req.body;
+        console.log({
+            locationData,
+        })
         if (!locationData) {
             return res.status(400).json({error: "Location data is required."});
         }
@@ -184,11 +188,18 @@ class UserController {
         try {
             // Validate the request body against the schema
             const validation = await validateSchema(locationSchema, locationData);
+            console.log({
+                validation
+            })
             if (!validation.valid) {
                 return res.status(400).json({errors: validation.errors});
             }
 
             const {AAngBase} = await getModels();
+            console.log({
+                AAngBase,
+                validation,
+            })
 
             // Let MongoDB auto-generate the _id
             const updatedUser = await AAngBase.findOneAndUpdate(

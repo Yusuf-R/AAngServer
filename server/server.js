@@ -10,6 +10,7 @@ import os from 'os';
 import redisClient from './utils/redis';
 import dbClient from '../server/database/mongoDB';
 import NotificationSocket from "./socket/NotificationSocket";
+import DriverNotificationService from "./services/DriverNotificationService";
 
 const app = express();
 const securityConfig = new SecurityConfig();
@@ -133,6 +134,37 @@ io.on('connection', (socket) => {
             recipients: io.sockets.sockets.size - 1,
             ...data
         });
+    });
+
+    // In your Node.js WebSocket server
+    socket.on('order:assignment', async (data) => {
+        try {
+            console.log('📦 Received order assignment from admin: ',   data.orderAssignment._id);
+
+            // Acknowledge receipt back to admin
+            socket.emit('order:assignment:ack', {
+                success: true,
+                timestamp: new Date().toISOString()
+            });
+            // implement notification logic here
+            // >> in app notification and push notification
+            const {orderAssignment, orderId } = data;
+            const results = await DriverNotificationService.handleOrderAssignment(orderAssignment);
+
+            socket.emit('order:assignment:ack', {
+                success: true,
+                orderAssignmentId: orderAssignment._id,
+                notificationResults: results,
+                timestamp: new Date().toISOString()
+            });
+
+            console.log(`✅ Notifications processed for order ${orderAssignment._id}`);
+        } catch (error) {
+            console.error('Error processing order assignment:', error);
+            socket.emit('order:assignment:error', {
+                error: error.message,
+            });
+        }
     });
 
     // 👤 Authenticated user socket

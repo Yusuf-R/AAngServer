@@ -37,6 +37,7 @@ authRouter.post('/verify-pin', AuthController.verifyAuthPin);
 authRouter.patch('/toggle-pin', AuthController.toggleAuthPin);
 authRouter.delete('/remove-pin', AuthController.removeAuthPin);
 authRouter.get('/status-pim', AuthController.getAuthPinStatus);
+authRouter.patch('/update-push-token', AuthController.updatePushToken);
 
 // Terms and Conditions
 authRouter.post('/tcs', AuthController.acceptTCs);
