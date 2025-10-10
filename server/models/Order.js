@@ -245,6 +245,7 @@ const DriverAssignedTrackingSchema = new Schema({
         type: String,
         enum: ['assigned', 'accepted', 'rejected', 'cancelled', 'completed']
     },
+
     rejectionReason: String,
     responseTime: Number,
 }, {_id: false, strictPopulate: false  });

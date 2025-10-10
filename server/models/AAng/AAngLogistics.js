@@ -347,7 +347,72 @@ const DriverSchema = new Schema({
             status: {type: String, enum: ['reported', 'investigating', 'resolved'], default: 'reported'},
             handledBy: {type: Schema.Types.ObjectId, ref: 'Admin'}
         }]
-    }
+    },
+    // Delivery History & Analytics
+    deliveryHistory: {
+        // Recent deliveries for quick access (last 20)
+        recentDeliveries: [{
+            orderId: { type: Schema.Types.ObjectId, ref: 'Order', required: true },
+            orderRef: String,
+            clientName: String,
+            pickupLocation: String,
+            dropoffLocation: String,
+            distance: Number, // km
+            earnings: Number,
+            duration: Number, // minutes
+            completedAt: { type: Date, default: Date.now },
+            rating: { type: Number, min: 1, max: 5 },
+            clientFeedback: String,
+            status: {
+                type: String,
+                enum: ['completed', 'cancelled', 'failed'],
+                default: 'completed'
+            }
+        }],
+
+        // Delivery patterns and insights
+        deliveryPatterns: {
+            favoriteAreas: [{
+                zone: String,
+                deliveryCount: Number,
+                averageEarnings: Number,
+                lastDelivered: Date
+            }],
+            peakHours: [{
+                hour: Number, // 0-23
+                deliveryCount: Number,
+                averageEarnings: Number
+            }],
+            bestPerformingDays: [{
+                day: String, // 'monday', 'tuesday', etc.
+                averageEarnings: Number,
+                deliveryCount: Number
+            }]
+        },
+
+        // Quality metrics
+        qualityMetrics: {
+            onTimeDeliveries: { type: Number, default: 0 },
+            lateDeliveries: { type: Number, default: 0 },
+            customerComplaints: { type: Number, default: 0 },
+            positiveRatings: { type: Number, default: 0 },
+            deliverySuccessRate: { type: Number, default: 100 } // percentage
+        },
+
+        // Milestones and achievements
+        milestones: {
+            firstDelivery: Date,
+            hundredthDelivery: Date,
+            bestEarningDay: {
+                date: Date,
+                amount: Number
+            },
+            longestStreak: {
+                days: Number,
+                period: String // e.g., "2024-01-01 to 2024-01-07"
+            }
+        }
+    },
 });
 // Enhanced Admin Schema
 const AdminSchema = new Schema({
@@ -673,7 +738,8 @@ const AAngSchema = new Schema({
     pushTokenStatus: {
         valid: { type: Boolean, default: true },
         lastVerified: Date,
-        failureCount: { type: Number, default: 0 }
+        failureCount: { type: Number, default: 0 },
+        isSubscribed: { type: Boolean, default: false },
     },
     sessionTokens: [{
         token: String,

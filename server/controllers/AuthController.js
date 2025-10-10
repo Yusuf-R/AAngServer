@@ -14,6 +14,7 @@ import MailClient from '../utils/mailer';
 import {logInSchema, resetPasswordSchema, signUpSchema, validateSchema} from "../validators/validateAuth";
 import {cloudinary} from '../utils/cloudinary'
 import getOrderModels from "../models/Order";
+import DriverController from "./DriverController"
 import order from "../models/Order";
 
 // Environment variables
@@ -74,60 +75,109 @@ class AuthController {
                 });
             }
 
-            const {expoPushToken} = req.body;
-            if (!expoPushToken) {
-                return res.status(400).json({error: 'Missing push token'});
-            }
-
-            // Validate Expo push token format
-            if (!expoPushToken.startsWith('ExponentPushToken[') || !expoPushToken.endsWith(']')) {
-                return res.status(400).json({error: 'Invalid push token format'});
-            }
-
-            const {userId} = preCheckResult;
+            const {expoPushToken, enabled} = req.body;
+            const {userData} = preCheckResult;
             const {AAngBase} = await getModels();
 
-            // Check if token already exists and is the same
-            const existingUser = await AAngBase.findById(userId);
+            // Fetch current user data
+            const existingUser = await AAngBase.findById(userData._id);
 
-            if (existingUser?.expoPushToken === expoPushToken) {
-                // Token unchanged, just update last verified date
+            if (!existingUser) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            // CASE 1: Toggle operation (no token provided, just enabled flag)
+            if (expoPushToken === undefined && enabled !== undefined) {
+                // User is just toggling notifications on/off
+                if (!existingUser.expoPushToken) {
+                    return res.status(400).json({
+                        error: 'No push token registered. Please enable notifications first.',
+                        requiresTokenRegistration: true
+                    });
+                }
+
                 await AAngBase.updateOne(
-                    {_id: userId},
+                    {_id: userData._id},
                     {
                         $set: {
+                            'pushTokenStatus.isSubscribed': enabled,
                             'pushTokenStatus.lastVerified': new Date(),
-                            'pushTokenStatus.valid': true
                         }
                     }
                 );
 
+                console.log(`🔔 Push notifications ${enabled ? 'enabled' : 'disabled'} for user ${userData._id}`);
+
                 return res.status(200).json({
                     success: true,
-                    message: 'Push token verified (unchanged)',
-                    tokenUnchanged: true
+                    message: `Notifications ${enabled ? 'enabled' : 'disabled'} successfully`,
+                    isSubscribed: enabled,
+                    toggleOnly: true
                 });
             }
 
-            // Token is new or changed, update everything
-            await AAngBase.updateOne(
-                {_id: userId},
-                {
-                    $set: {
-                        expoPushToken,
-                        'pushTokenStatus.valid': true,
-                        'pushTokenStatus.lastVerified': new Date(),
-                        'pushTokenStatus.failureCount': 0
-                    }
+            // CASE 2: Token registration/update (token provided)
+            if (expoPushToken) {
+                // Validate Expo push token format
+                if (!expoPushToken.startsWith('ExponentPushToken[') || !expoPushToken.endsWith(']')) {
+                    return res.status(400).json({error: 'Invalid push token format'});
                 }
-            );
 
-            console.log(`✅ Push token updated for user ${userId}`);
+                // Check if token is unchanged
+                if (existingUser.expoPushToken === expoPushToken) {
+                    // Token unchanged, just update metadata and subscription status
+                    const updateData = {
+                        'pushTokenStatus.lastVerified': new Date(),
+                        'pushTokenStatus.valid': true,
+                    };
 
-            return res.status(200).json({
-                success: true,
-                message: 'Push token updated successfully',
-                tokenUpdated: true
+                    // If enabled flag is provided, update subscription status
+                    if (enabled !== undefined) {
+                        updateData['pushTokenStatus.isSubscribed'] = enabled;
+                    }
+
+                    await AAngBase.updateOne(
+                        {_id: userData._id},
+                        {$set: updateData}
+                    );
+
+                    return res.status(200).json({
+                        success: true,
+                        message: 'Push token verified (unchanged)',
+                        tokenUnchanged: true,
+                        isSubscribed: enabled !== undefined ? enabled : existingUser.pushTokenStatus?.isSubscribed
+                    });
+                }
+
+                // Token is new or changed, update everything
+                const updateData = {
+                    expoPushToken,
+                    'pushTokenStatus.valid': true,
+                    'pushTokenStatus.lastVerified': new Date(),
+                    'pushTokenStatus.failureCount': 0,
+                };
+
+                // Default to enabled on new token registration, or use provided value
+                updateData['pushTokenStatus.isSubscribed'] = enabled !== undefined ? enabled : true;
+
+                await AAngBase.updateOne(
+                    {_id: userData._id},
+                    {$set: updateData}
+                );
+
+                console.log(`✅ Push token ${existingUser.expoPushToken ? 'updated' : 'registered'} for user ${userData._id}`);
+
+                return res.status(200).json({
+                    success: true,
+                    message: 'Push token registered successfully',
+                    tokenUpdated: true,
+                    isSubscribed: updateData['pushTokenStatus.isSubscribed']
+                });
+            }
+
+            // CASE 3: Invalid request (neither token nor enabled provided)
+            return res.status(400).json({
+                error: 'Invalid request. Provide either expoPushToken or enabled flag.'
             });
 
         } catch (error) {
@@ -293,7 +343,7 @@ class AuthController {
             const {email, name, picture, googleId} = userInfo;
 
             const {AAngBase} = await getModels();
-            let user = await AAngBase.findOne({email});
+            let user = await AAngBase.findOne({email: email.toLowerCase()});
 
             if (user) {
                 // Check if this Google account is already linked
@@ -367,7 +417,7 @@ class AuthController {
             } else {
                 // New user - create account with Google auth
                 user = await AAngBase.create({
-                    email,
+                    email: email.toLowerCase(),
                     fullName: name,
                     avatar: picture,
                     authMethods: [{
@@ -1069,8 +1119,6 @@ class AuthController {
      * User registration with credentials
      */
     static async signUp(req, res) {
-        console.log('trying to SignUp');
-
         const {email, password, role} = req.body;
 
         if (!email || !password || !role) {
@@ -1090,7 +1138,7 @@ class AuthController {
             const {AAngBase} = await getModels();
 
             // Check if user already exists
-            let user = await AAngBase.findOne({email});
+            let user = await AAngBase.findOne({ email: email.toLowerCase() });
             if (user) {
                 // Get available auth methods
                 const authMethods = user.authMethods?.map(am => am.type) || [];
@@ -1107,7 +1155,7 @@ class AuthController {
 
             // Create user
             user = await AAngBase.create({
-                email,
+                email: email.toLowerCase(),
                 password: hashedPassword,
                 role: roleCapitalized,
                 authMethods: [{
@@ -1163,7 +1211,7 @@ class AuthController {
             const {AAngBase} = await getModels();
 
             // Find user
-            const user = await AAngBase.findOne({email});
+            const user = await AAngBase.findOne({ email: email.toLowerCase() });
 
             if (!user) {
                 console.log('User not found')
@@ -1207,6 +1255,17 @@ class AuthController {
             });
 
             // get userDashboard data
+            if (user.role === 'Driver') {
+                const userDashboard = await DriverController.userDashBoardData(user)
+
+                return res.status(201).json({
+                    accessToken,
+                    refreshToken,
+                    user: userDashboard,
+                    expiresIn: accessExpiresMs
+                });
+
+            }
             const userDashboard = await AuthController.userDashBoardData(user)
 
             return res.status(201).json({

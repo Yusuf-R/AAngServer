@@ -9,6 +9,7 @@ const notificationRouter = require('./NotificationRoutes');
 const s3Router = require('./S3Routes');
 const orderRouter = require('./OrderRoutes');
 const adminRouter = require('./AdminRoutes');
+const driverRouter = require('./DriverRoutes')
 
 const securityConfig = new SecurityConfig()
 const { corsOptions } = securityConfig;
@@ -27,5 +28,6 @@ router.use('/api/v1/notification', notificationRouter);
 router.use('/api/v1/s3', s3Router);
 router.use('/api/v1/order', orderRouter);
 router.use('/api/v1/admin', adminRouter);
+router.use('/api/v1/driver', driverRouter);
 
 module.exports = router;

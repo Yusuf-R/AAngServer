@@ -4,6 +4,7 @@ import ExpoPushService from "./ExpoPushService"
 import Order from "../models/Order";
 import NotificationService from "./NotificationService";
 
+
 class DriverNotificationService {
     /**
      * Main method - uses your existing NotificationService
@@ -73,6 +74,7 @@ class DriverNotificationService {
      * Create driver notification using your existing NotificationService
      */
     async createDriverNotification(driverId, order, assignmentId) {
+        const { Driver } = await getModels();
         const driver = await Driver.findById(driverId).select('fullName phoneNumber');
 
         return await NotificationService.createNotification({

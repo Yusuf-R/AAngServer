@@ -3,9 +3,394 @@ import {profileUpdateSchema, validateSchema, avatarSchema} from "../validators/v
 import getModels from "../models/AAng/AAngLogistics";
 import locationSchema from "../validators/locationValidator";
 import mongoose from "mongoose";
+import {transformRepl} from "@babel/cli/lib/babel/util";
+import getOrderModels from "../models/Order";
 
 
-class UserController {
+class DriverController {
+
+    static async updateOnlineStatus(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { status } = req.body;
+
+        if (!status) {
+            return res.status(400).json({ error: "Missing required fields" });
+        }
+
+        const dbStatus = ["online", "offline", "on-ride", "break", "maintenance"];
+
+        if (!dbStatus.includes(status)) {
+            return res.status(400).json({ error: "Unknown status instruction" });
+        }
+
+        try {
+            const { Driver } = await getModels();
+
+
+            // Enhanced update with operational status
+            const updateData = {
+                'availabilityStatus': status,
+                'operationalStatus.isActive': status === 'online',
+                'operationalStatus.lastActiveAt': new Date()
+            };
+
+            // If going offline, clear current order if not on-ride
+            if (status === 'offline' && userData.availabilityStatus !== 'on-ride') {
+                updateData['operationalStatus.currentOrderId'] = null;
+            }
+
+            const updatedUser = await Driver.findByIdAndUpdate(
+                userData._id,
+                { $set: updateData },
+                { new: true }
+            );
+
+            if (!updatedUser) {
+                return res.status(404).json({ error: "User not found" });
+            }
+
+            console.log('Driver status updated successfully');
+
+            // Get comprehensive dashboard data
+            const dashboardData = await DriverController.userDashBoardData(updatedUser);
+
+            if (!dashboardData) {
+                return res.status(404).json({ error: "Dashboard data not found" });
+            }
+
+            return res.status(201).json({
+                success: true,
+                driverData: dashboardData
+            });
+
+        } catch (error) {
+            console.log("Status update error:", error);
+            return res.status(500).json({
+                error: "An error occurred while updating status"
+            });
+        }
+    }
+
+    static async userDashBoardData(userObject, flag = null) {
+        let orderData, orderAssignments, activeOrder, recentOrders;
+        const { AAngBase } = await getModels();
+        const { Order, OrderAssignment } = await getOrderModels();
+
+        // Populate user with all necessary data
+        const user = await AAngBase.findById(userObject._id)
+            .populate('operationalStatus.currentOrderId')
+            .populate('wallet.recentTransactions.orderId')
+            .lean();
+
+        if (!user) {
+            throw new Error('User not found');
+        }
+
+        // Get order-related data for drivers
+        if (user.role === 'Driver') {
+            // Get active order if exists
+            if (user.operationalStatus?.currentOrderId) {
+                activeOrder = await Order.findById(user.operationalStatus.currentOrderId)
+                    .populate('clientId', 'fullName phoneNumber avatar')
+                    .lean();
+            }
+
+            // Get recent completed orders (last 10)
+            recentOrders = await Order.find({
+                'driverAssignment.driverId': user._id,
+                status: 'delivered'
+            })
+                .sort({ 'driverAssignment.actualTimes.deliveredAt': -1 })
+                .limit(10)
+                .populate('clientId', 'fullName phoneNumber')
+                .select('orderRef status pricing package location driverAssignment rating createdAt')
+                .lean();
+
+            // Get pending order assignments
+            orderAssignments = await OrderAssignment.find({
+                'availableDrivers.driverId': user._id,
+                status: 'broadcasting'
+            })
+                .populate('orderId')
+                .lean();
+        }
+
+        // Enhanced verification checks for drivers
+        const verificationChecks = {
+            Client: () => user.emailVerified === true && user.nin?.verified === true,
+
+            Driver: () => {
+                const basicChecks = user.emailVerified === true && user.nin?.verified === true;
+
+                // Document verification status
+                const documentChecks = {
+                    license: user.verification?.documentsStatus?.license === 'approved',
+                    vehicleRegistration: user.verification?.documentsStatus?.vehicleRegistration === 'approved',
+                    insurance: user.verification?.documentsStatus?.insurance === 'approved',
+                    roadWorthiness: user.verification?.documentsStatus?.roadWorthiness === 'approved',
+                    profilePhoto: user.verification?.documentsStatus?.profilePhoto === 'approved',
+                    backgroundCheck: user.verification?.documentsStatus?.backgroundCheck === 'approved'
+                };
+
+                const allDocumentsApproved = Object.values(documentChecks).every(status => status === true);
+
+                return basicChecks && allDocumentsApproved;
+            },
+
+            Admin: () => true,
+        };
+
+        const isFullyVerified = verificationChecks[user.role]?.() || false;
+
+        // Calculate profile completion percentage for drivers
+        let profileCompletion = 100;
+        if (user.role === 'Driver') {
+            const completionChecks = [
+                user.emailVerified,
+                user.phoneNumber,
+                user.fullName,
+                user.vehicleDetails?.plateNumber,
+                user.vehicleDetails?.type,
+                user.verification?.documentsStatus?.license === 'approved',
+                user.verification?.documentsStatus?.vehicleRegistration === 'approved',
+                user.verification?.documentsStatus?.insurance === 'approved',
+                user.wallet?.bankDetails?.accountNumber,
+            ].filter(Boolean).length;
+
+            profileCompletion = Math.round((completionChecks / 9) * 100);
+        }
+
+        // Enhanced dashboard data structure
+        return {
+            // Basic user info
+            id: user._id.toString(),
+            email: user.email,
+            fullName: user.fullName,
+            avatar: user.avatar,
+            role: user.role.toLowerCase(),
+            phoneNumber: user.phoneNumber,
+            gender: user.gender,
+            dob: user.dob ? new Date(user.dob).toISOString() : null,
+            address: user.address,
+            state: user.state,
+            lga: user.lga,
+
+            // Authentication & Verification
+            emailVerified: user.emailVerified,
+            ninVerified: user.nin?.verified || false,
+            isFullyVerified,
+            profileCompletion,
+
+            // Driver-specific operational data
+            availabilityStatus: user.availabilityStatus || 'offline',
+            operationalStatus: user.operationalStatus ? {
+                currentOrderId: user.operationalStatus.currentOrderId?._id || null,
+                lastLocationUpdate: user.operationalStatus.lastLocationUpdate,
+                connectionQuality: user.operationalStatus.connectionQuality,
+                isActive: user.operationalStatus.isActive,
+                lastActiveAt: user.operationalStatus.lastActiveAt
+            } : null,
+
+            currentLocation: user.currentLocation ? {
+                coordinates: user.currentLocation.coordinates,
+                address: user.currentLocation.address,
+                timestamp: user.currentLocation.timestamp,
+                isMoving: user.currentLocation.isMoving
+            } : null,
+
+            // Vehicle details
+            vehicleDetails: user.vehicleDetails ? {
+                type: user.vehicleDetails.type,
+                plateNumber: user.vehicleDetails.plateNumber,
+                model: user.vehicleDetails.model,
+                year: user.vehicleDetails.year,
+                color: user.vehicleDetails.color,
+                capacity: user.vehicleDetails.capacity,
+                insuranceExpiry: user.vehicleDetails.insuranceExpiry,
+                registrationExpiry: user.vehicleDetails.registrationExpiry
+            } : null,
+
+            // Performance metrics
+            performance: user.performance ? {
+                totalDeliveries: user.performance.totalDeliveries || 0,
+                completionRate: user.performance.completionRate || 0,
+                averageRating: user.performance.averageRating || 0,
+                averageDeliveryTime: user.performance.averageDeliveryTime || 0,
+                onTimeDeliveryRate: user.performance.onTimeDeliveryRate || 0,
+                cancellationRate: user.performance.cancellationRate || 0,
+                averageResponseTime: user.performance.averageResponseTime || 0,
+
+                weeklyStats: user.performance.weeklyStats || {
+                    deliveries: 0,
+                    earnings: 0,
+                    hoursOnline: 0,
+                    distance: 0,
+                    fuelCost: 0,
+                    rating: 0
+                },
+
+                monthlyStats: user.performance.monthlyStats || {
+                    deliveries: 0,
+                    earnings: 0,
+                    hoursOnline: 0,
+                    distance: 0,
+                    fuelCost: 0,
+                    rating: 0
+                }
+            } : null,
+
+            // Wallet and financial data
+            wallet: user.wallet ? {
+                balance: user.wallet.balance || 0,
+                pendingEarnings: user.wallet.pendingEarnings || 0,
+                totalEarnings: user.wallet.totalEarnings || 0,
+                totalWithdrawn: user.wallet.totalWithdrawn || 0,
+
+                bankDetails: user.wallet.bankDetails ? {
+                    accountName: user.wallet.bankDetails.accountName,
+                    accountNumber: user.wallet.bankDetails.accountNumber,
+                    bankName: user.wallet.bankDetails.bankName,
+                    verified: user.wallet.bankDetails.verified
+                } : null,
+
+                recentTransactions: user.wallet.recentTransactions?.map(tx => ({
+                    type: tx.type,
+                    amount: tx.amount,
+                    description: tx.description,
+                    timestamp: tx.timestamp,
+                    reference: tx.reference
+                })) || []
+            } : null,
+
+            // Verification and compliance
+            verification: user.verification ? {
+                documentsStatus: user.verification.documentsStatus || {},
+                overallStatus: user.verification.overallStatus || 'pending',
+                complianceScore: user.verification.complianceScore || 100
+            } : null,
+
+            // Schedule and availability
+            schedule: user.schedule ? {
+                preferredWorkingHours: user.schedule.preferredWorkingHours,
+                currentShift: user.schedule.currentShift,
+                timeOff: user.schedule.timeOff
+            } : null,
+
+            // Order data (crucial for driver operations)
+            orderData: {
+                activeOrder: activeOrder ? {
+                    id: activeOrder._id,
+                    orderRef: activeOrder.orderRef,
+                    status: activeOrder.status,
+                    client: {
+                        id: activeOrder.clientId?._id,
+                        name: activeOrder.clientId?.fullName,
+                        phone: activeOrder.clientId?.phoneNumber
+                    },
+                    package: activeOrder.package,
+                    location: activeOrder.location,
+                    pricing: activeOrder.pricing,
+                    deliveryWindow: activeOrder.deliveryWindow,
+                    trackingHistory: activeOrder.orderTrackingHistory
+                } : null,
+
+                recentOrders: recentOrders?.map(order => ({
+                    id: order._id,
+                    orderRef: order.orderRef,
+                    status: order.status,
+                    clientName: order.clientId?.fullName,
+                    pickupLocation: order.location?.pickUp?.address,
+                    dropoffLocation: order.location?.dropOff?.address,
+                    earnings: order.pricing?.totalAmount || 0,
+                    completedAt: order.driverAssignment?.actualTimes?.deliveredAt,
+                    rating: order.rating?.clientRating?.stars,
+                    clientFeedback: order.rating?.clientRating?.feedback
+                })) || [],
+
+                pendingAssignments: orderAssignments?.map(assignment => ({
+                    id: assignment._id,
+                    orderId: assignment.orderId?._id,
+                    orderRef: assignment.orderId?.orderRef,
+                    broadcastRadius: assignment.broadcastRadius,
+                    timeoutDuration: assignment.timeoutDuration,
+                    notifiedAt: assignment.availableDrivers?.find(d => d.driverId.toString() === user._id.toString())?.notifiedAt
+                })) || []
+            },
+
+            // Emergency and safety
+            emergency: user.emergency ? {
+                emergencyContact: user.emergency.emergencyContact,
+                safetyFeatures: user.emergency.safetyFeatures
+            } : null,
+
+            // Additional metadata
+            authPin: user.authPin ? {
+                isEnabled: user.authPin.isEnabled
+            } : null,
+
+            authMethods: user.authMethods?.map(method => ({
+                type: method.type,
+                verified: method.verified,
+                lastUsed: method.lastUsed
+            })) || [],
+
+            primaryProvider: user.provider || user.preferredAuthMethod,
+            tcs: {
+                isAccepted: user.tcs?.isAccepted || false
+            },
+
+            // Timestamps
+            createdAt: user.createdAt,
+            updatedAt: user.updatedAt
+        };
+    }
+
+    static async getDashboardData(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+
+        try {
+            const { AAngBase } = await getModels();
+            const user = await AAngBase.findById(userData._id);
+
+            if (!user) {
+                return res.status(404).json({ error: 'User not found' });
+            }
+
+            // Get comprehensive dashboard data with order information
+            const userDashboard = await DriverController.userDashBoardData(user);
+
+            return res.status(200).json({
+                success: true,
+                user: userDashboard,
+                timestamp: new Date().toISOString()
+            });
+
+        } catch (err) {
+            console.error('Dashboard data error:', err);
+            return res.status(500).json({
+                error: 'Failed to fetch dashboard data',
+                details: err.message
+            });
+        }
+    }
 
     static async updateProfile(req, res) {
         // Perform API pre-check
@@ -165,7 +550,6 @@ class UserController {
     // Enhanced Location CRUD operations
 
     static async createLocation(req, res) {
-        console.log('I was called');
         // Perform API pre-check
         const preCheckResult = await AuthController.apiPreCheck(req);
 
@@ -494,4 +878,4 @@ class UserController {
 
 }
 
-module.exports = UserController;
+module.exports = DriverController;
