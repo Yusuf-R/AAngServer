@@ -144,14 +144,12 @@ const DriverSchema = new Schema({
     // Current License Number - keep for backward compatibility
     licenseNumber: String,
     vehicleType: String, // Keep for backward compatibility
-
     // Operational Status
     availabilityStatus: {
         type: String,
         enum: ["online", "offline", "on-ride", "break", "maintenance"],
         default: "offline",
     },
-
     operationalStatus: {
         currentOrderId: {type: Schema.Types.ObjectId, ref: 'Order'},
         lastLocationUpdate: {type: Date, default: Date.now},
@@ -162,7 +160,6 @@ const DriverSchema = new Schema({
         isActive: {type: Boolean, default: false},
         lastActiveAt: {type: Date, default: Date.now}
     },
-
     // Real-time Location & Movement
     currentLocation: {
         coordinates: {
@@ -177,7 +174,6 @@ const DriverSchema = new Schema({
         isMoving: {type: Boolean, default: false},
         zone: String
     },
-
     // Vehicle & Equipment Details
     vehicleDetails: {
         type: {type: String, enum: ['bicycle', 'motorcycle', 'tricycle', 'van', 'truck', 'car']},
@@ -191,13 +187,6 @@ const DriverSchema = new Schema({
             passengers: {type: Number, default: 0}
         },
         insuranceExpiry: Date,
-        roadWorthiness: {
-            certificateNumber: String,
-            expiryDate: Date,
-            verified: {type: Boolean, default: false},
-            verifiedBy: {type: Schema.Types.ObjectId, ref: 'Admin'},
-            verificationDate: Date
-        },
         registrationExpiry: Date
     },
 
@@ -269,22 +258,318 @@ const DriverSchema = new Schema({
         }]
     },
 
-    // Verification & Compliance
+    // Replace existing verification object with this comprehensive structure
     verification: {
-        documentsStatus: {
-            license: {type: String, enum: ["pending", "approved", "rejected", "expired"], default: "pending"},
-            vehicleRegistration: {type: String, enum: ["pending", "approved", "rejected", "expired"], default: "pending"},
-            insurance: {type: String, enum: ["pending", "approved", "rejected", "expired"], default: "pending"},
-            roadWorthiness: {type: String, enum: ["pending", "approved", "rejected", "expired"], default: "pending"},
-            profilePhoto: {type: String, enum: ["pending", "approved", "rejected"], default: "pending"},
-            backgroundCheck: {type: String, enum: ["pending", "approved", "rejected"], default: "pending"}
+        // Overall Status
+        overallStatus: {
+            type: String,
+            enum: ["incomplete", "pending",  "submitted", "approved", "rejected", "suspended", "expired"],
+            default: "pending"
         },
-        overallStatus: {type: String, enum: ["pending", "approved", "rejected", "suspended"], default: "pending"},
-        verifiedBy: {type: Schema.Types.ObjectId, ref: 'Admin'},
+        verifiedBy: { type: Schema.Types.ObjectId, ref: 'Admin' },
         verificationDate: Date,
+        lastReviewDate: Date,
         nextReviewDate: Date,
+        rejectionReason: String,
         notes: String,
-        complianceScore: {type: Number, default: 100, min: 0, max: 100}
+        complianceScore: { type: Number, default: 0, min: 0, max: 100 },
+
+        // Basic Verification (Required for ALL vehicle types)
+        basicVerification: {
+            // Means of Identification (Choose ONE)
+            identification: {
+                type: {
+                    type: String,
+                    enum: ['drivers_license', 'nigerian_passport', 'nin_card', 'nin_slip', null],
+                    default: null
+                },
+                number: String,
+                expiryDate: Date, // Not needed for NIN
+                frontImageUrl: String,
+                backImageUrl: String, // Optional for some ID types
+                verified: { type: Boolean, default: false },
+                verifiedAt: Date,
+                verifiedBy: { type: Schema.Types.ObjectId, ref: 'Admin' },
+                status: {
+                    type: String,
+                    enum: ["pending", "submitted", "approved", "rejected", "expired"],
+                    default: "pending"
+                },
+                rejectionReason: String
+            },
+
+            // Passport Photograph
+            passportPhoto: {
+                imageUrl: String,
+                uploadedAt: Date,
+                verified: { type: Boolean, default: false },
+                verifiedAt: Date,
+                status: {
+                    type: String,
+                    enum: ["pending","submitted", "approved", "rejected"],
+                    default: "pending"
+                },
+                rejectionReason: String
+            },
+
+            // Operational Location
+            operationalArea: {
+                state: { type: String },
+                lga: { type: String },
+                verified: { type: Boolean, default: false },
+                verifiedAt: Date
+            },
+
+            // Bank Account Details (Can add multiple)
+            bankAccounts: [{
+                accountName: { type: String },
+                accountNumber: { type: String },
+                bankName: { type: String },
+                bankCode: String,
+                isPrimary: { type: Boolean, default: false },
+                verified: { type: Boolean, default: false },
+                verifiedAt: Date,
+                verificationMethod: String, // 'paystack', 'manual', etc.
+                addedAt: { type: Date, default: Date.now }
+            }],
+
+            // Basic verification completion status
+            isComplete: { type: Boolean, default: false },
+            completedAt: Date
+        },
+
+        // Vehicle-Specific Verification (Based on vehicleType)
+        specificVerification: {
+            // For BICYCLE
+            bicycle: {
+                hasHelmet: { type: Boolean, default: false },
+                helmetNote: String, // Advisory note if no helmet
+                backpackEvidence: {
+                    imageUrl: String,
+                    uploadedAt: Date,
+                    verified: { type: Boolean, default: false },
+                    status: {
+                        type: String,
+                        enum: ["pending", "submitted", "approved", "rejected"],
+                        default: "pending"
+                    }
+                },
+                bicyclePictures: {
+                    front: { imageUrl: String, uploadedAt: Date },
+                    rear: { imageUrl: String, uploadedAt: Date },
+                    side: { imageUrl: String, uploadedAt: Date },
+                    verified: { type: Boolean, default: false }
+                }
+            },
+
+            // For TRICYCLE
+            tricycle: {
+                pictures: {
+                    front: { imageUrl: String, uploadedAt: Date },
+                    rear: { imageUrl: String, uploadedAt: Date },
+                    side: { imageUrl: String, uploadedAt: Date },
+                    inside: { imageUrl: String, uploadedAt: Date },
+                    verified: { type: Boolean, default: false }
+                },
+                driversLicense: {
+                    number: String,
+                    expiryDate: Date,
+                    imageUrl: String,
+                    verified: { type: Boolean, default: false },
+                    status: {
+                        type: String,
+                        enum: ["pending", "submitted", "approved", "rejected", "expired"],
+                        default: "pending"
+                    }
+                },
+                // Lagos-specific (conditional)
+                hackneyPermit: {
+                    number: String,
+                    expiryDate: Date,
+                    imageUrl: String,
+                    verified: { type: Boolean, default: false },
+                    required: { type: Boolean, default: false } // Based on state
+                },
+                lasdriCard: {
+                    number: String,
+                    expiryDate: Date,
+                    imageUrl: String,
+                    verified: { type: Boolean, default: false },
+                    required: { type: Boolean, default: false }
+                }
+            },
+
+            // For MOTORCYCLE
+            motorcycle: {
+                pictures: {
+                    front: { imageUrl: String, uploadedAt: Date },
+                    rear: { imageUrl: String, uploadedAt: Date },
+                    side: { imageUrl: String, uploadedAt: Date },
+                    verified: { type: Boolean, default: false }
+                },
+                ridersPermit: {
+                    cardNumber: String,
+                    expiryDate: Date,
+                    imageUrl: String,
+                    issuingOffice: String, // MVAA office
+                    verified: { type: Boolean, default: false },
+                    status: {
+                        type: String,
+                        enum: ["pending", "submitted", "approved", "rejected", "expired"],
+                        default: "pending"
+                    }
+                },
+                commercialLicense: {
+                    licenseNumber: String,
+                    class: { type: String, default: 'A' }, // Class A for motorcycles
+                    expiryDate: Date,
+                    imageUrl: String,
+                    verified: { type: Boolean, default: false },
+                    status: {
+                        type: String,
+                        enum: ["pending", "approved", "submitted", "rejected", "expired"],
+                        default: "pending"
+                    }
+                },
+                proofOfAddress: {
+                    documentType: { type: String, enum: ['nepa_bill', 'utility_bill', 'other'] },
+                    imageUrl: String,
+                    uploadedAt: Date,
+                    verified: { type: Boolean, default: false }
+                },
+                proofOfOwnership: {
+                    documentType: { type: String, enum: ['change_of_ownership', 'receipt', 'other'] },
+                    imageUrl: String,
+                    uploadedAt: Date,
+                    verified: { type: Boolean, default: false }
+                },
+                roadWorthiness: {
+                    certificateNumber: String,
+                    expiryDate: Date,
+                    imageUrl: String,
+                    verified: { type: Boolean, default: false }
+                },
+                bvnNumber: {
+                    number: String,
+                    verified: { type: Boolean, default: false },
+                    optional: { type: Boolean, default: true }
+                },
+                // Lagos-specific
+                hackneyPermit: {
+                    number: String,
+                    expiryDate: Date,
+                    imageUrl: String,
+                    verified: { type: Boolean, default: false },
+                    required: { type: Boolean, default: false }
+                },
+                lasdriCard: {
+                    number: String,
+                    expiryDate: Date,
+                    imageUrl: String,
+                    verified: { type: Boolean, default: false },
+                    required: { type: Boolean, default: false }
+                }
+            },
+
+            // For VEHICLE (Car, Van, Truck)
+            vehicle: {
+                pictures: {
+                    front: { imageUrl: String, uploadedAt: Date },
+                    rear: { imageUrl: String, uploadedAt: Date },
+                    side: { imageUrl: String, uploadedAt: Date },
+                    inside: { imageUrl: String, uploadedAt: Date },
+                    verified: { type: Boolean, default: false }
+                },
+                driversLicense: {
+                    number: String,
+                    class: String, // e.g., 'C', 'D', 'E' for different vehicle types
+                    expiryDate: Date,
+                    imageUrl: String,
+                    verified: { type: Boolean, default: false },
+                    status: {
+                        type: String,
+                        enum: ["pending","submitted", "approved", "rejected", "expired"],
+                        default: "pending"
+                    }
+                },
+                vehicleRegistration: {
+                    registrationNumber: String,
+                    expiryDate: Date,
+                    imageUrl: String,
+                    verified: { type: Boolean, default: false },
+                    status: {
+                        type: String,
+                        enum: ["pending", "submitted", "approved", "rejected", "expired"],
+                        default: "pending"
+                    }
+                },
+                insurance: {
+                    policyNumber: String,
+                    provider: String,
+                    expiryDate: Date,
+                    imageUrl: String,
+                    verified: { type: Boolean, default: false },
+                    status: {
+                        type: String,
+                        enum: ["pending", "submitted", "approved", "rejected", "expired"],
+                        default: "pending"
+                    }
+                },
+                roadWorthiness: {
+                    certificateNumber: String,
+                    expiryDate: Date,
+                    imageUrl: String,
+                    verified: { type: Boolean, default: false },
+                    status: {
+                        type: String,
+                        enum: ["pending", "submitted", "approved", "rejected", "expired"],
+                        default: "pending"
+                    }
+                },
+                // Lagos-specific
+                hackneyPermit: {
+                    number: String,
+                    expiryDate: Date,
+                    imageUrl: String,
+                    verified: { type: Boolean, default: false },
+                    required: { type: Boolean, default: false }
+                },
+                lasdriCard: {
+                    number: String,
+                    expiryDate: Date,
+                    imageUrl: String,
+                    verified: { type: Boolean, default: false },
+                    required: { type: Boolean, default: false }
+                }
+            },
+
+            // Track which specific verification applies
+            activeVerificationType: {
+                type: String,
+                enum: ['bicycle', 'tricycle', 'motorcycle', 'vehicle', null],
+                default: null
+            },
+            isComplete: { type: Boolean, default: false },
+            completedAt: Date
+        },
+
+        // Progress Tracking
+        progress: {
+            basicVerificationProgress: { type: Number, default: 0, min: 0, max: 100 },
+            specificVerificationProgress: { type: Number, default: 0, min: 0, max: 100 },
+            overallProgress: { type: Number, default: 0, min: 0, max: 100 },
+            lastUpdated: { type: Date, default: Date.now }
+        },
+
+        // Submission History
+        submissions: [{
+            submittedAt: { type: Date, default: Date.now },
+            submissionType: { type: String, enum: ['initial', 'resubmission', 'update'] },
+            reviewedBy: { type: Schema.Types.ObjectId, ref: 'Admin' },
+            reviewedAt: Date,
+            status: { type: String, enum: ['pending',"submitted", 'approved', 'rejected'] },
+            feedback: String
+        }]
     },
 
     // Schedule & Availability
@@ -881,6 +1166,9 @@ DriverSchema.index({
     "currentLocation.zone": 1,
     availabilityStatus: 1
 });
+DriverSchema.index({ 'verification.overallStatus': 1 });
+DriverSchema.index({ 'verification.basicVerification.isComplete': 1 });
+DriverSchema.index({ 'verification.specificVerification.isComplete': 1 });
 
 // Admin schema indexes
 AdminSchema.index({  adminRole: 1, status: 1 });

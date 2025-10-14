@@ -31,6 +31,46 @@ class S3Controller {
         }
     }
 
+    static async GenerateDriverPresignedUrl(req, res) {
+        const preCheck = await AuthController.apiPreCheck(req);
+        if (!preCheck.success) {
+            return res.status(preCheck.statusCode).json(preCheck);
+        }
+
+        const { userData } = preCheck;
+        const { fileType, fileName, category, subcategory, fileIdentifier } = req.body;
+
+        // Validate required fields
+        if (!fileType || !fileName || !category) {
+            return res.status(400).json({ error: "Missing required fields: fileType, fileName, category" });
+        }
+
+        // Validate category-specific fields
+        if (category === 'identification' && (!subcategory || !fileIdentifier)) {
+            return res.status(400).json({ error: "Identification requires subcategory (ID type) and fileIdentifier (front/back)" });
+        }
+
+        if ((category === 'vehiclePicture' || category === 'vehicleDocument') && (!subcategory || !fileIdentifier)) {
+            return res.status(400).json({ error: "Vehicle files require subcategory (vehicle type) and fileIdentifier" });
+        }
+
+        try {
+            const { uploadURL, fileURL, key } = await amazonS3Client.generateDriverPresignedUrl(
+                fileType,
+                category,
+                subcategory,
+                fileIdentifier,
+                userData._id,
+                fileName
+            );
+
+            return res.status(200).json({ uploadURL, fileURL, key });
+        } catch (error) {
+            console.error('Driver S3 URL Generation Error:', error);
+            return res.status(500).json({ error: error.message || 'Failed to generate upload URL.' });
+        }
+    }
+
     static async listFiles(req, res) {
         const preCheck = await AuthController.apiPreCheck(req);
         if (!preCheck.success) {

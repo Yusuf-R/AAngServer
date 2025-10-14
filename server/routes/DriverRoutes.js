@@ -20,5 +20,8 @@ driverRouter.put('/update-avatar', driverController.updateAvatar);
 driverRouter.post('/location/create', driverController.createLocation);
 driverRouter.put('/location/update', driverController.updateLocation);
 driverRouter.delete('/location/delete', driverController.deleteLocation);
+// data validation
+driverRouter.get('/verification/status', driverController.verificationStatus);
+driverRouter.patch('/verification/submit', driverController.submitVerification);
 
 module.exports = driverRouter;

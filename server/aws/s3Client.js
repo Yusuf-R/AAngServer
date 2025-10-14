@@ -127,6 +127,58 @@ class AmazonS3Client {
         }
     }
 
+    async generateDriverPresignedUrl(fileType, category, subcategory, fileIdentifier, driverId, fileName) {
+        const timestamp = Date.now();
+        const ext = fileName.split('.').pop();
+
+        // Generate structured path based on category
+        let key;
+
+        switch(category) {
+            case 'profile':
+                key = `Drivers/${driverId}/profile/${timestamp}.${ext}`;
+                break;
+
+            case 'identification':
+                // subcategory = identificationType (e.g., 'drivers_license')
+                // fileIdentifier = 'front' or 'back'
+                key = `Drivers/${driverId}/identification/${subcategory}/${fileIdentifier}.${ext}`;
+                break;
+
+            case 'vehiclePicture':
+                // subcategory = vehicleType (e.g., 'motorcycle')
+                // fileIdentifier = 'front', 'rear', 'side'
+                key = `Drivers/${driverId}/vehicle/${subcategory}/pictures/${fileIdentifier}.${ext}`;
+                break;
+
+            case 'vehicleDocument':
+                // subcategory = vehicleType
+                // fileIdentifier = 'license', 'insurance', 'roadWorthiness', etc.
+                key = `Drivers/${driverId}/vehicle/${subcategory}/documents/${fileIdentifier}.${ext}`;
+                break;
+
+            default:
+                throw new Error('Invalid file category');
+        }
+
+        const command = new PutObjectCommand({
+            Bucket: this.bucketName,
+            Key: key,
+            ContentType: fileType,
+        });
+
+        try {
+            const uploadURL = await getSignedUrl(this.client, command, {
+                expiresIn: 300, // 5 minutes
+            });
+            const fileURL = `https://${this.bucketName}.s3.${process.env.S3_REGION}.amazonaws.com/${key}`;
+            return { uploadURL, fileURL, key };
+        } catch (error) {
+            console.error('❌ Driver Presigned URL error:', error.message);
+            throw error;
+        }
+    }
+
     async listFiles(prefix = '') {
         try {
             const command = new ListObjectsV2Command({

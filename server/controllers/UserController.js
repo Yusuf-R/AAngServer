@@ -76,12 +76,9 @@ class UserController {
 
             // get dashboard data
             const dashboardData = await AuthController.userDashBoardData(updatedUser);
-            console.log('B');
             if (!dashboardData) {
                 return res.status(404).json({error: "Dashboard data not found"});
             }
-
-            console.log('A');
 
             return res.status(200).json({
                 message: "Profile updated successfully",
