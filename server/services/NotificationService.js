@@ -122,6 +122,130 @@ class NotificationService extends EventEmitter {
             priority: 'HIGH',
             channels: { push: true, inApp: true },
         });
+
+        this.templates.set('verification.document_submitted', {
+            title: '📄 Document Submitted for Review',
+            body: 'Your {documentType} has been submitted and is under review. We\'ll notify you once it\'s verified.',
+            priority: 'NORMAL',
+            channels: { push: true, inApp: true },
+        });
+
+        this.templates.set('verification.document_verified', {
+            title: '✅ Document Verified',
+            body: 'Your {documentType} has been successfully verified! You can now start accepting orders.',
+            priority: 'HIGH',
+            channels: { push: true, inApp: true, sms: true },
+            actionButtons: [
+                { label: 'Start Driving', action: 'navigate', deepLink: '/driver/dashboard' }
+            ]
+        });
+
+        this.templates.set('verification.document_rejected', {
+            title: '❌ Document Rejected',
+            body: 'Your {documentType} was rejected. Reason: {rejectionReason}. Please resubmit with corrections.',
+            priority: 'URGENT',
+            channels: { push: true, inApp: true, email: true },
+            actionButtons: [
+                { label: 'Resubmit Document', action: 'navigate', deepLink: '/driver/documents' },
+                { label: 'Contact Support', action: 'navigate', deepLink: '/driver/support' }
+            ]
+        });
+
+        this.templates.set('verification.document_review', {
+            title: '🔍 Document Under Review',
+            body: 'Your {documentType} is currently being reviewed. This usually takes 1-2 business days.',
+            priority: 'NORMAL',
+            channels: { push: true, inApp: true },
+        });
+
+        // ADMIN-SPECIFIC NOTIFICATIONS
+        this.templates.set('admin.driver_document_submitted', {
+            title: '🚗 New Driver Document Submitted',
+            body: 'Driver {driverName} has submitted {documentType} for verification. Review required.',
+            priority: 'HIGH',
+            channels: { push: true, inApp: true },
+            actionButtons: [
+                { label: 'Review Now', action: 'navigate', deepLink: '/admin/drivers/verification' },
+                { label: 'View Driver', action: 'navigate', deepLink: '/admin/drivers/{driverId}' }
+            ]
+        });
+
+        this.templates.set('admin.order_review_required', {
+            title: '⚠️ Order Requires Admin Review',
+            body: 'Order {orderRef} requires your review. {reason}',
+            priority: 'URGENT',
+            channels: { push: true, inApp: true },
+            actionButtons: [
+                { label: 'Review Order', action: 'navigate', deepLink: '/admin/orders/view/{orderId}' },
+                { label: 'Approve', action: 'approve', deepLink: '/admin/orders/approve/{orderId}' },
+                { label: 'Reject', action: 'reject', deepLink: '/admin/orders/reject/{orderId}' }
+            ]
+        });
+
+        this.templates.set('admin.payment_failed_alert', {
+            title: '💳 Payment Failed Alert',
+            body: 'Payment for order {orderRef} failed. Amount: {amount}. User: {userName}.',
+            priority: 'HIGH',
+            channels: { push: true, inApp: true, email: true },
+            actionButtons: [
+                { label: 'View Order', action: 'navigate', deepLink: '/admin/orders/view/{orderId}' },
+                { label: 'Contact User', action: 'navigate', deepLink: '/admin/users/{userId}' }
+            ]
+        });
+
+        this.templates.set('admin.system_alert', {
+            title: '🔔 System Alert',
+            body: '{alertMessage}',
+            priority: 'CRITICAL',
+            channels: { push: true, inApp: true, email: true, sms: true },
+        });
+
+        // ORDER ASSIGNMENT FOR DRIVERS
+        this.templates.set('driver.order_assigned', {
+            title: '📦 New Order Assigned',
+            body: 'You have a new delivery assignment! Order: {orderRef}, Pickup: {pickupLocation}',
+            priority: 'URGENT',
+            channels: { push: true, inApp: true },
+            actionButtons: [
+                { label: 'Accept Order', action: 'accept', deepLink: '/driver/orders/{orderId}/accept' },
+                { label: 'Reject Order', action: 'reject', deepLink: '/driver/orders/{orderId}/reject' },
+                { label: 'View Details', action: 'view', deepLink: '/driver/orders/{orderId}' }
+            ]
+        });
+
+        this.templates.set('driver.order_broadcast', {
+            title: '🚀 New Order Available',
+            body: 'New delivery opportunity near you! {distance} away. Payment: {amount}',
+            priority: 'HIGH',
+            channels: { push: true, inApp: true },
+            actionButtons: [
+                { label: 'View Order', action: 'view', deepLink: '/driver/orders/broadcast/{orderId}' },
+                { label: 'Accept Now', action: 'accept', deepLink: '/driver/orders/{orderId}/accept' }
+            ]
+        });
+
+        // CLIENT ORDER STATUS UPDATES
+        this.templates.set('order.admin_approved', {
+            title: '✅ Order Approved',
+            body: 'Your order {orderRef} has been approved and is now being processed.',
+            priority: 'NORMAL',
+            channels: { push: true, inApp: true },
+            actionButtons: [
+                { label: 'Track Order', action: 'track', deepLink: '/client/orders/track/{orderId}' },
+                { label: 'View Details', action: 'view', deepLink: '/client/orders/{orderId}' }
+            ]
+        });
+
+        this.templates.set('order.admin_rejected', {
+            title: '❌ Order Not Approved',
+            body: 'Your order {orderRef} was not approved. Reason: {rejectionReason}. Full refund will be processed.',
+            priority: 'HIGH',
+            channels: { push: true, inApp: true, email: true },
+            actionButtons: [
+                { label: 'View Details', action: 'view', deepLink: '/client/orders/{orderId}' },
+                { label: 'Contact Support', action: 'support', deepLink: '/client/support' }
+            ]
+        });
     }
 
     // ------------------ RULES ------------------
@@ -529,6 +653,190 @@ class NotificationService extends EventEmitter {
         );
     }
 
+    /**
+     * Create notification when driver submits documents
+     * This will notify both the driver and the admin
+     */
+    async  notifyDriverDocumentSubmission(driverData, documentType) {
+        try {
+            // Notify the driver
+            await this.createNotification({
+                userId: driverData._id,
+                type: 'verification.document_submitted',
+                templateData: {
+                    documentType: documentType
+                },
+                priority: 'NORMAL'
+            });
+
+            // Notify admin(s) - you'll need to fetch admin users
+            const admins = await getAdminUsers(); // Implement this function
+            for (const admin of admins) {
+                await this.createNotification({
+                    userId: admin._id,
+                    type: 'admin.driver_document_submitted',
+                    templateData: {
+                        driverName: driverData.name,
+                        documentType: documentType,
+                        driverId: driverData._id
+                    },
+                    metadata: {
+                        driverId: driverData._id,
+                        documentType: documentType
+                    },
+                    priority: 'HIGH'
+                });
+            }
+        } catch (error) {
+            console.error('Error notifying document submission:', error);
+        }
+    }
+
+    /**
+     * Create notification when admin approves/rejects driver documents
+     */
+    async  notifyDriverDocumentVerification(driverData, documentType, status, rejectionReason = null) {
+        try {
+            const type = status === 'approved'
+                ? 'verification.document_verified'
+                : 'verification.document_rejected';
+
+            const templateData = {
+                documentType: documentType
+            };
+
+            if (rejectionReason) {
+                templateData.rejectionReason = rejectionReason;
+            }
+
+            await this.createNotification({
+                userId: driverData._id,
+                type: type,
+                templateData: templateData,
+                priority: status === 'approved' ? 'HIGH' : 'URGENT'
+            });
+        } catch (error) {
+            console.error('Error notifying document verification:', error);
+        }
+    }
+
+    /**
+     * Create notification when order requires admin review
+     */
+    async  notifyAdminOrderReview(orderData, reason) {
+        try {
+            const admins = await getAdminUsers();
+            for (const admin of admins) {
+                await this.createNotification({
+                    userId: admin._id,
+                    type: 'admin.order_review_required',
+                    templateData: {
+                        orderRef: orderData.orderRef,
+                        orderId: orderData._id,
+                        reason: reason
+                    },
+                    metadata: {
+                        orderId: orderData._id,
+                        orderRef: orderData.orderRef,
+                        reason: reason
+                    },
+                    priority: 'URGENT'
+                });
+            }
+        } catch (error) {
+            console.error('Error notifying admin order review:', error);
+        }
+    }
+
+    /**
+     * Create notification when admin approves/rejects order
+     */
+    async  notifyClientOrderDecision(orderData, status, rejectionReason = null) {
+        try {
+            const type = status === 'approved'
+                ? 'order.admin_approved'
+                : 'order.admin_rejected';
+
+            const templateData = {
+                orderRef: orderData.orderRef,
+                orderId: orderData._id
+            };
+
+            if (rejectionReason) {
+                templateData.rejectionReason = rejectionReason;
+            }
+
+            await this.createNotification({
+                userId: orderData.clientId,
+                type: type,
+                templateData: templateData,
+                metadata: {
+                    orderId: orderData._id,
+                    orderRef: orderData.orderRef
+                },
+                priority: status === 'approved' ? 'NORMAL' : 'HIGH'
+            });
+        } catch (error) {
+            console.error('Error notifying client order decision:', error);
+        }
+    }
+
+    /**
+     * Create notification when order is assigned to driver
+     */
+    async  notifyDriverOrderAssignment(orderData, driverData) {
+        try {
+            await this.createNotification({
+                userId: driverData._id,
+                type: 'driver.order_assigned',
+                templateData: {
+                    orderRef: orderData.orderRef,
+                    orderId: orderData._id,
+                    pickupLocation: orderData.location?.pickUp?.address || 'Location TBD'
+                },
+                metadata: {
+                    orderId: orderData._id,
+                    orderRef: orderData.orderRef,
+                    assignedAt: new Date()
+                },
+                priority: 'URGENT'
+            });
+        } catch (error) {
+            console.error('Error notifying driver assignment:', error);
+        }
+    }
+
+    /**
+     * Create notification for payment failures (admin alert)
+     */
+    async  notifyAdminPaymentFailed(orderData, paymentData, userData) {
+        try {
+            const admins = await getAdminUsers();
+            for (const admin of admins) {
+                await this.createNotification({
+                    userId: admin._id,
+                    type: 'admin.payment_failed_alert',
+                    templateData: {
+                        orderRef: orderData.orderRef,
+                        orderId: orderData._id,
+                        amount: orderData.pricing?.totalAmount || 0,
+                        userName: userData.name,
+                        userId: userData._id
+                    },
+                    metadata: {
+                        orderId: orderData._id,
+                        orderRef: orderData.orderRef,
+                        paymentId: paymentData._id,
+                        userId: userData._id
+                    },
+                    priority: 'HIGH'
+                });
+            }
+        } catch (error) {
+            console.error('Error notifying admin payment failed:', error);
+        }
+    }
+
     // ------------------ NOTIFICATION DELIVERY ------------------
     /**
      * Send a notification immediately
@@ -560,7 +868,7 @@ class NotificationService extends EventEmitter {
      */
 
     async cleanupOldNotifications(daysOld = 30) {
-        const cutoffDate = new Date();templates
+        const cutoffDate = new Date();
         cutoffDate.setDate(cutoffDate.getDate() - daysOld);
 
         // Delete read, low/normal priority notifications older than X days
