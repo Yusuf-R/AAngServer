@@ -218,15 +218,20 @@ const localIP = getLocalIP();
             process.exit(1);
         }
 
+        // Load ALL models
         const getModels = await import('./models/AAng/AAngLogistics.js').then(m => m.default);
         const getOrderModels = await import('./models/Order').then(m => m.default);
+        const getConversationModel = await import('./models/Conversation').then(m => m.default);
+        const getMessageModel = await import('./models/Message').then(m => m.default);
+
+        // Initialize all models
         await getOrderModels();
         await getModels();
+        await getConversationModel(); // ✅ Chat models registered
+        await getMessageModel();      // ✅ Chat models registered
 
-        server.listen(port, () => {
-            console.log(`🌐 Express server listening at http://localhost:${port}`);
-            console.log(`✅ Socket.IO ready at http://${localIP}:${port}`);
-        });
+        console.log('✅ All database models registered');
+
 
     } catch (error) {
         console.error({

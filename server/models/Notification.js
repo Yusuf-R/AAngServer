@@ -140,7 +140,8 @@ const NotificationSchema = new mongoose.Schema({
         required: {
             type: Boolean,
             default: false,
-            index: true, // Critical index for admin queries
+            index: true,
+            strictPopulate: false
         },
 
         // Type of admin action needed
