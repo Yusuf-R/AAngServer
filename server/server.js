@@ -11,11 +11,11 @@ import redisClient from './utils/redis';
 import dbClient from '../server/database/mongoDB';
 import NotificationSocket from "./socket/NotificationSocket";
 import DriverNotificationService from "./services/DriverNotificationService";
+import ChatController from "./controllers/ChatController";
 
 const app = express();
 const securityConfig = new SecurityConfig();
 const { corsOptions } = securityConfig;
-const router = require('./routes/router');
 
 dotenv.config({ path: '.env' });
 
@@ -26,17 +26,10 @@ app.use(cookieParser());
 app.options('*', cors(corsOptions));
 app.use(cors(corsOptions));
 
-// 📌 REST API routes
-app.use('/api/v1/order/paystack-webhook', express.raw({
-    type: 'application/json'
-}));
-app.use(router);
-const port = process.env.EXPRESS_PORT;
-
-// 🌐 Create HTTP server
+// Create HTTP server
 const server = http.createServer(app);
 
-// 🔌 Setup socket.io server
+// Initialize Socket.IO
 const io = new Server(server, {
     cors: {
         origin: [
@@ -46,8 +39,24 @@ const io = new Server(server, {
         ].filter(Boolean),
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
         credentials: true
-    }
+    },
+    allowEIO3: true
 });
+
+// Make io available globally
+global.io = io;
+
+// Initialize router with io instance
+const createRouter = require('./routes/router');
+const router = createRouter(io);
+
+// 📌 REST API routes
+app.use('/api/v1/order/paystack-webhook', express.raw({
+    type: 'application/json'
+}));
+app.use(router);
+
+const port = process.env.EXPRESS_PORT;
 
 // ✅ Make io globally available
 global.io = io;
@@ -169,7 +178,7 @@ io.on('connection', (socket) => {
 
     // 👤 Authenticated user socket
     console.log(`✅ Authenticated socket connected: ${socket.userId}`);
-    socket.join(socket.userId);
+    socket.join(`user:${socket.userId}`);
 
     // ✅ Delegate to NotificationSocket class
     new NotificationSocket(socket);
@@ -179,6 +188,75 @@ io.on('connection', (socket) => {
         const serverTime = Date.now();
         const latency = serverTime - clientTime;
         callback({ serverTime, latency });
+    });
+
+    socket.on('chat:join-conversation', async (conversationId) => {
+        socket.join(conversationId);
+        console.log(`📨 User ${socket.userId} joined conversation room: ${conversationId}`);
+    });
+
+    socket.on('chat:leave-conversation', (conversationId) => {
+        socket.leave(conversationId);
+        console.log(`🚪 User ${socket.userId} left conversation: ${conversationId}`);
+    });
+
+    // Chat sections
+    socket.on('chat:send-message', async (data) => {
+        try {
+            const { conversationId, body, kind = 'text', source = 'mobile', message } = data;
+
+            console.log(`📤 ${source.toUpperCase()} message from ${socket.userId || 'web-admin'}`);
+
+            let savedMessage;
+
+            if (source === 'mobile') {
+                // MOBILE: Save to DB + deliver
+                const messageResult = await ChatController.sendMessage({
+                    conversationId,
+                    userId: socket.userId,
+                    userRole: socket.userRole,
+                    messageData: { body, kind }
+                });
+
+                if (!messageResult.success) {
+                    return socket.emit('chat:error', { error: messageResult.error });
+                }
+                savedMessage = messageResult.data;
+            } else {
+                // ADMIN: Use provided message (already saved by Next.js)
+                savedMessage = message;
+            }
+
+            // Find the OTHER person in this 1-1 chat
+            const getConversationModel = await import('./models/Conversation').then(m => m.default);
+            const Conversation = await getConversationModel();
+            const conversation = await Conversation.findById(conversationId);
+            const otherParticipant = conversation.participants.find(
+                p => p.userId.toString() !== (source === 'web' ? savedMessage.senderId : socket.userId)
+            );
+
+            if (!otherParticipant) {
+                return socket.emit('chat:error', { error: 'Other participant not found' });
+            }
+
+            socket.to(conversationId).emit('chat:message:new', savedMessage);
+
+            // Deliver to the other person
+            socket.to(`user:${otherParticipant.userId}`).emit('chat:message:new', savedMessage);
+
+            // Confirm to sender (if it came via socket)
+            if (source !== 'web') { // Only confirm for mobile, admin already knows
+                socket.emit('chat:message:sent', savedMessage);
+            }
+
+            console.log(`✅ Delivered to: ${otherParticipant.userId} via ${source === 'web' ? 'socket-primary' : 'socket-mobile'}`);
+            console.log(`✅ Delivered to conversation room: ${conversationId}`);
+            console.log(`✅ Delivered to user room: user:${otherParticipant.userId}`);
+
+        } catch (error) {
+            console.error('❌ Delivery error:', error);
+            socket.emit('chat:error', { error: 'Failed to deliver message' });
+        }
     });
 
     socket.on('disconnect', () => {
@@ -230,8 +308,11 @@ const localIP = getLocalIP();
         await getConversationModel(); // ✅ Chat models registered
         await getMessageModel();      // ✅ Chat models registered
 
-        console.log('✅ All database models registered');
-
+        server.listen(port, () => {
+            console.log('✅ All database models registered');
+            console.log(`🌐 Express server listening at http://localhost:${port}`);
+            console.log(`✅ Socket.IO ready at http://${localIP}:${port}`);
+        });
 
     } catch (error) {
         console.error({

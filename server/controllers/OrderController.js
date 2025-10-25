@@ -23,22 +23,22 @@ const ORDER_STATUS = {
     DRAFT: 'draft',
     SUBMITTED: 'submitted',
     PAID: 'paid',
-    ADMIN_REVIEW:'admin_review',
-    ADMIN_APPROVED:'admin_approved',
-    ADMIN_REJECTED:'admin_rejected',
-    PENDING:'pending',
-    BROADCAST:'broadcast',
-    ASSIGNED:'assigned',
-    CONFIRMED:'confirmed',
-    DRIVER_EN_ROUTE_PICKUP:'en_route_pickup',
-    DRIVER_ARRIVED_PICKUP:'arrived_pickup',  // Driver at pickup location
-    DRIVER_PICKED_UP:'picked_up',
-    DRIVER_IN_TRANSIT:'in_transit',
-    DRIVER_ARRIVED_DROPOFF:'arrived_dropoff',
-    DRIVER_DELIVERED:'delivered',
-    DELIVERY_FAILED:'failed',
-    DELIVERY_CANCELLED:'cancelled',
-    DELIVERY_RETURNED:'returned',
+    ADMIN_REVIEW: 'admin_review',
+    ADMIN_APPROVED: 'admin_approved',
+    ADMIN_REJECTED: 'admin_rejected',
+    PENDING: 'pending',
+    BROADCAST: 'broadcast',
+    ASSIGNED: 'assigned',
+    CONFIRMED: 'confirmed',
+    DRIVER_EN_ROUTE_PICKUP: 'en_route_pickup',
+    DRIVER_ARRIVED_PICKUP: 'arrived_pickup',  // Driver at pickup location
+    DRIVER_PICKED_UP: 'picked_up',
+    DRIVER_IN_TRANSIT: 'in_transit',
+    DRIVER_ARRIVED_DROPOFF: 'arrived_dropoff',
+    DRIVER_DELIVERED: 'delivered',
+    DELIVERY_FAILED: 'failed',
+    DELIVERY_CANCELLED: 'cancelled',
+    DELIVERY_RETURNED: 'returned',
     CANCELLED: 'cancelled',
 };
 
@@ -1806,5 +1806,4 @@ payStackInit(payload) {
     }
 }
 
-module
-    .exports = OrderController;
+module.exports = OrderController;

@@ -20,4 +20,4 @@ class WalletController  {
 
 }
 
-export default WalletController;
+module.exports = WalletController;

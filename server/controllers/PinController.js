@@ -4,4 +4,4 @@ class PinController  {
 
 }
 
-export default PinController;
+module.exports = PinController;
