@@ -12,6 +12,7 @@ import dbClient from '../server/database/mongoDB';
 import NotificationSocket from "./socket/NotificationSocket";
 import DriverNotificationService from "./services/DriverNotificationService";
 import ChatController from "./controllers/ChatController";
+import getSupportTicketModel from "./models/Ticket";
 
 const app = express();
 const securityConfig = new SecurityConfig();
@@ -301,12 +302,14 @@ const localIP = getLocalIP();
         const getOrderModels = await import('./models/Order').then(m => m.default);
         const getConversationModel = await import('./models/Conversation').then(m => m.default);
         const getMessageModel = await import('./models/Message').then(m => m.default);
+        const getTicketModel = await import('./models/Ticket').then(m => m.default);
 
         // Initialize all models
         await getOrderModels();
         await getModels();
         await getConversationModel(); // ✅ Chat models registered
         await getMessageModel();      // ✅ Chat models registered
+        await getTicketModel(); // ✅ Support models registered
 
         server.listen(port, () => {
             console.log('✅ All database models registered');

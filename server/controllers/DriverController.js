@@ -80,6 +80,56 @@ class DriverController {
         }
     }
 
+    static async tcsAcceptance(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {acceptedTcs} = req.body;
+        if (typeof acceptedTcs !== 'boolean') {
+            return res.status(400).json({error: 'acceptedTcs must be a boolean'});
+        }
+        if (!acceptedTcs) {
+            return res.status(400).json({error: 'You must accept the terms and conditions'});
+        }
+        const {userData} = preCheckResult;
+        try {
+            const {AAngBase} = await getModels();
+            const user = await AAngBase.findById(userData._id);
+
+            if (!user) {
+                return res.status(404).json({error: 'User not found'});
+            }
+
+            // set tcs to true
+            user.tcs.isAccepted = true
+            user.tcs.acceptedAt = new Date();
+
+            await user.save();
+
+            // get dashboard data
+            const dashboardData = await DriverController.userDashBoardData(user);
+            if (!dashboardData) {
+                return res.status(404).json({error: "Dashboard data not found"});
+            }
+
+            return res.status(200).json({
+                message: "Profile updated successfully",
+                user: dashboardData
+            });
+        } catch (err) {
+            console.error('Change password error:', err);
+            return res.status(500).json({error: 'Failed to change password'});
+        }
+
+    }
+
     static async userDashBoardData(userObject, flag = null) {
         let orderData, orderAssignments, activeOrder, recentOrders;
         const { AAngBase } = await getModels();
