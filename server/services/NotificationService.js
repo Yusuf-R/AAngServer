@@ -2,6 +2,7 @@
 import Notification from '../models/Notification';
 import {EventEmitter} from 'events';
 import SocketEmitter from "../utils/socketEmitter";
+import getModels from "../models/AAng/AAngLogistics";
 
 /**
  * Core Notification Service that extends EventEmitter
@@ -670,7 +671,7 @@ class NotificationService extends EventEmitter {
             });
 
             // Notify admin(s) - you'll need to fetch admin users
-            const admins = await getAdminUsers(); // Implement this function
+            const admins = await this.getAdminUsers(); // Implement this function
             for (const admin of admins) {
                 await this.createNotification({
                     userId: admin._id,
@@ -690,6 +691,11 @@ class NotificationService extends EventEmitter {
         } catch (error) {
             console.error('Error notifying document submission:', error);
         }
+    }
+
+    async getAdminUsers() {
+        const {Admin} = await getModels();
+        return Admin.find();
     }
 
     /**

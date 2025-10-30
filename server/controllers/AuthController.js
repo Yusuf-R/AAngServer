@@ -1138,7 +1138,7 @@ class AuthController {
             const {AAngBase} = await getModels();
 
             // Check if user already exists
-            let user = await AAngBase.findOne({ email: email.toLowerCase() });
+            let user = await AAngBase.findOne({email: email.toLowerCase()});
             if (user) {
                 // Get available auth methods
                 const authMethods = user.authMethods?.map(am => am.type) || [];
@@ -1211,7 +1211,7 @@ class AuthController {
             const {AAngBase} = await getModels();
 
             // Find user
-            const user = await AAngBase.findOne({ email: email.toLowerCase() });
+            const user = await AAngBase.findOne({email: email.toLowerCase()});
 
             if (!user) {
                 console.log('User not found')
@@ -1343,7 +1343,8 @@ class AuthController {
                 }
             }
             const {reqType} = req.body;
-            if (!reqType || (reqType !== 'Email' && reqType !== 'Password')) {
+            const validReqTypes = ['Email', 'Password'];
+            if (!reqType || !validReqTypes.includes(reqType)) {
                 return res.status(400).json({error: 'Invalid reqType of token request'});
             }
             // if reqType is Email and Email has already been verified, return error

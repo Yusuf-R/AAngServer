@@ -3,8 +3,10 @@ import {profileUpdateSchema, validateSchema, avatarSchema} from "../validators/v
 import getModels from "../models/AAng/AAngLogistics";
 import locationSchema from "../validators/locationValidator";
 import mongoose from "mongoose";
-import {transformRepl} from "@babel/cli/lib/babel/util";
 import getOrderModels from "../models/Order";
+import MailClient from "../utils/mailer";
+import NotificationService from "../services/NotificationService";
+import Notification from '../models/Notification';
 
 
 class DriverController {
@@ -591,6 +593,358 @@ class DriverController {
             });
         }
 
+    }
+
+    static async generateVerificationToken({length = 6, numericOnly = false} = {}) {
+        const digits = '0123456789';
+        const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+        if (numericOnly) {
+            return Array.from({length}, () => digits[Math.floor(Math.random() * digits.length)]).join('');
+        }
+
+        if (length < 4) {
+            throw new Error('Length must be at least 4 to satisfy 2 letters and 2 digits.');
+        }
+
+        // 2 letters
+        const tokenParts = [
+            ...Array.from({length: 2}, () => letters[Math.floor(Math.random() * letters.length)]),
+            ...Array.from({length: 2}, () => digits[Math.floor(Math.random() * digits.length)])
+        ];
+
+        // Fill remaining with mixed letters/digits
+        const mix = letters + digits;
+        const remainingLength = length - tokenParts.length;
+        for (let i = 0; i < remainingLength; i++) {
+            tokenParts.push(mix[Math.floor(Math.random() * mix.length)]);
+        }
+
+        // Shuffle the final array
+        for (let i = tokenParts.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [tokenParts[i], tokenParts[j]] = [tokenParts[j], tokenParts[i]];
+        }
+
+        return tokenParts.join('');
+    }
+
+    // Verification
+    static async getToken(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const {email, reqType} = req.body;
+        const user = userData;
+        if (!email) {
+            return res.status(400).json({error: "Email is required."});
+        }
+        if (email !== userData.email) {
+            return res.status(400).json({error: "Forbidden request."});
+        }
+        const validReqTypes = ['EmailVerification', 'PasswordReset', 'PinVerification'];
+        if (!reqType || !validReqTypes.includes(reqType)) {
+            return res.status(400).json({ error: 'Invalid reqType of token request' });
+        }
+        if (reqType === 'EmailVerification' && user.emailVerified) {
+            return res.status(400).json({error: 'Email is already verified'});
+        }
+        try {
+            // Generate new verification token
+            const verificationToken = await DriverController.generateVerificationToken({numericOnly: true});
+            // Set token expiry to 10 mins
+            const verificationTokenExpiry = Date.now() + 600000; // 10 minutes
+
+            if (reqType === 'PinVerification') {
+                user.authPinResetToken = verificationToken;
+                user.authPinResetExpiry = verificationTokenExpiry;
+            } else if (reqType === 'PasswordReset') {
+                user.resetPasswordToken = verificationToken;
+                user.resetPasswordExpiry = verificationTokenExpiry;
+            } else if (reqType === 'EmailVerification') {
+                user.emailVerificationToken = verificationToken;
+                user.emailVerificationExpiry = verificationTokenExpiry;
+            }
+            await user.save();
+
+            // Send verification email token according to the reqType
+            switch (reqType) {
+                case "EmailVerification":
+                    await MailClient.sendEmailToken(user.email, verificationToken);
+                    break;
+                case "PasswordReset":
+                    await MailClient.passwordResetToken(user.email, verificationToken);
+                    break;
+                case "PinVerification":
+                    await MailClient.authResetToken(user.email, verificationToken);
+                    break;
+                default:
+                    break;
+            }
+
+            // await MailClient.sendEmailToken(user.email, verificationToken);
+            console.log('Operation Successful');
+
+            return res.status(201).json({message: 'Verification Token sent successfully'});
+
+        } catch (error) {
+            console.log('Operation Failed: ', error);
+            return res.status(500).json({error: 'Failed to send verification token'});
+        }
+    }
+
+    static async verifyEmail(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+        const {email, token, reqType} = req.body;
+        if (!email || !token || reqType !== 'EmailVerification') {
+            return res.status(400).json({error: 'Invalid request format or type'});
+        }
+
+        try {
+            const user = await DriverController.verifyToken(reqType, token);
+
+            user.emailVerified = true;
+            user.emailVerificationToken = undefined;
+            user.emailVerificationExpiry = undefined;
+
+            const credentialsIndex = user.authMethods.findIndex(m => m.type === 'Credentials');
+            if (credentialsIndex !== -1) {
+                user.authMethods[credentialsIndex].verified = true;
+            }
+
+            await user.save();
+
+            // get userDashboard data
+            const userDashboard = await DriverController.userDashBoardData(user)
+
+
+            return res.status(201).json({
+                message: 'Email verified successfully',
+                user: userDashboard,
+            });
+        } catch (err) {
+            console.error('Email verification failed:', err.message);
+            return res.status(400).json({error: err.message});
+        }
+    }
+
+    static async resetPassword(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+        const {email, token, newPassword, reqType} = req.body;
+        if (!email || !token || !newPassword || !reqType) {
+            return res.status(400).json({error: 'Invalid request format or type'});
+        }
+        if (reqType !== 'PasswordReset') {
+            return res.status(400).json({error: 'Invalid reqType'});
+        }
+
+        try {
+            const user = await DriverController.verifyToken('PasswordReset', token);
+            // ensure the email is from the user
+            if (user.email.toLowerCase() !== email.toLowerCase()) {
+                return res.status(400).json({error: 'Forbidden request'});
+            }
+
+            // Hash and update the new password
+            user.password = await AuthController.hashPassword(newPassword);
+
+            user.resetPasswordToken = undefined;
+            user.resetPasswordExpiry = undefined;
+
+            await user.save();
+
+            // get userDashboard data
+            const userDashboard = await DriverController.userDashBoardData(user)
+
+
+            return res.status(201).json({
+                message: 'Password reset successfully',
+                user: userDashboard,
+            });
+        } catch (err) {
+            console.error('Password reset failed:', err.message);
+            return res.status(400).json({error: err.message});
+        }
+    }
+
+    static async  verifyToken(reqType, token) {
+        const {AAngBase} = await getModels();
+
+        switch (reqType) {
+            case 'EmailVerification': {
+                const user = await AAngBase.findOne({
+                    emailVerificationToken: token,
+                    emailVerificationExpiry: {$gt: Date.now()},
+                });
+                if (!user) throw new Error('Invalid or expired email verification token');
+                return user;
+            }
+            case 'PasswordReset': {
+                const user = await AAngBase.findOne({
+                    resetPasswordToken: token,
+                    resetPasswordExpiry: {$gt: Date.now()},
+                });
+                if (!user) throw new Error('Invalid or expired password reset token');
+                return user;
+            }
+            case 'SetAuthorizationPin':
+            case 'PinVerification': {
+                const user = await AAngBase.findOne({
+                    authPinResetToken: token,
+                    authPinResetExpiry: {$gt: Date.now()},
+                });
+                if (!user) throw new Error('Invalid or expired pin verification token');
+                return user;
+            }
+            default:
+                throw new Error('Unsupported verification type');
+        }
+    }
+
+    static async setAuthPin(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const {email, pin, reqType, token} = req.body;
+        if (!email || !pin) {
+            return res.status(400).json({error: "Email and pin are required."});
+        }
+        if (email !== userData.email) {
+            return res.status(400).json({error: "Forbidden request."});
+        }
+        if (reqType !== 'SetAuthorizationPin') {
+            return res.status(400).json({error: "Invalid request type."});
+        }
+        if (!token) {
+            return res.status(400).json({error: "Token is required."});
+        }
+        try {
+            const user = await DriverController.verifyToken('SetAuthorizationPin', token);
+
+            user.pinVerified = true;
+            user.pinVerificationToken = undefined;
+            user.pinVerificationExpiry = undefined;
+
+            // Determine if this is SET or RESET
+            const isReset = user.authPin?.isEnabled || false;
+            const action = isReset ? 'reset' : 'set';
+
+            // Hash the PIN
+            const hashedPin = AuthController.hashPassword(pin);
+
+            // Update PIN
+            user.authPin = {
+                pin: hashedPin,
+                isEnabled: true,
+                createdAt: isReset ? user.authPin.createdAt : new Date(),
+                lastUsed: null,
+                failedAttempts: 0,
+                lockedUntil: null
+            };
+
+            // Mark token as used
+            // user.pinVerificationToken.used = true;
+
+            // Add/Update AuthPin in auth methods
+            const authPinIndex = user.authMethods?.findIndex(m => m.type === 'AuthPin');
+
+            if (authPinIndex !== -1) {
+                user.authMethods[authPinIndex].verified = true;
+                user.authMethods[authPinIndex].lastUsed = new Date();
+            } else {
+                if (!user.authMethods) user.authMethods = [];
+                user.authMethods.push({
+                    type: 'AuthPin',
+                    verified: true,
+                    lastUsed: new Date()
+                });
+            }
+            await user.save();
+            // Create notification
+            await NotificationService.createNotification({
+                userId: user._id,
+                type: `security.pin_${action}`
+            });
+
+            console.log(`✅ PIN ${action} successfully`);
+
+            // Get user dashboard data
+            const userDashboard = await DriverController.userDashBoardData(user);
+
+            return res.status(200).json({
+                message: `PIN ${action} successfully`,
+                user: userDashboard
+            });
+
+        } catch (err) {
+            console.error('Pin verification failed:', err.message);
+            return res.status(400).json({error: err.message});
+        }
+    }
+
+    static async verifyAuthPinToken (req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const {email, token} = req.body;
+        if (!email || !token) {
+            return res.status(400).json({error: "Email and token are required."});
+        }
+        if (email !== userData.email) {
+            return res.status(400).json({error: "Forbidden request."});
+        }
+        try {
+            const user = await DriverController.verifyToken('PinVerification', token);
+
+            await user.save();
+
+            return res.status(201).json({
+                message: 'Pin verified successfully',
+            });
+        } catch (err) {
+            console.error('Pin verification failed:', err.message);
+            return res.status(400).json({error: err.message});
+        }
     }
 
     // Enhanced Location CRUD operations
@@ -1361,6 +1715,192 @@ class DriverController {
                 error: "An error occurred while submitting verification",
                 message: error.message
             });
+        }
+    }
+
+
+    static async getDriverNotification(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+
+        try {
+            const userId = userData._id;
+
+            const notifications = await NotificationService.getUserNotifications(userId, {
+                limit: 200,
+                offset: 0
+            });
+
+            const stats = await NotificationService.getNotificationStats(userId);
+
+            return res.status(200).json({ notifications, stats });
+        } catch (err) {
+            console.error('Fetch notifications error:', err);
+            return res.status(500).json({ error: 'Failed to fetch notifications' });
+        }
+    }
+
+    static async getNotificationStats(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+
+        try {
+            const userId = userData._id;
+
+            const stats = await NotificationService.getNotificationStats(userId);
+
+            return res.status(200).json({ stats });
+        } catch (err) {
+            console.error('Fetch notification stats error:', err);
+            return res.status(500).json({ error: 'Failed to fetch notification stats' });
+        }
+    }
+
+
+    static async markAsRead(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        try {
+            const { id } = req.body;
+            if (!id) return res.status(400).json({ error: 'Notification ID is required' });
+
+            const notification = await Notification.findById(id);
+            if (!notification) return res.status(404).json({ error: 'Notification not found' });
+
+            await notification.markAsRead();
+            return res.status(200).json({ message: 'Notification marked as read' });
+        } catch (err) {
+            console.error('Mark as read error:', err);
+            return res.status(500).json({ error: 'Failed to mark notification as read' });
+        }
+
+    }
+
+    static async markAllAsRead(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        try {
+            const userId = userData._id;
+
+            const result = await NotificationService.markAllAsRead(userId);
+            if (!result) return res.status(404).json({ error: 'No unread notifications found' });
+
+            return res.status(200).json({ message: 'All notifications marked as read' });
+        } catch (err) {
+            console.error('Mark all as read error:', err);
+            return res.status(500).json({ error: 'Failed to mark all notifications as read' });
+        }
+    }
+
+    static async getUnreadCount(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        try {
+            const userId = userData._id;
+
+            const unreadCount = await NotificationService.getUnreadCount(userId);
+            return res.status(200).json({ unreadCount });
+        } catch (err) {
+            console.error('Get unread count error:', err);
+            return res.status(500).json({ error: 'Failed to get unread count' });
+        }
+    }
+
+    static async deleteNotification(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const {id} = req.body;
+        if(!id) {
+            return res.status(400).json({ error: 'Notification ID is required' });
+        }
+        try {
+            const notification = await Notification.findById(id);
+            if (!notification) return res.status(404).json({ error: 'Notification not found' });
+
+            await notification.softDelete();
+            return res.status(200).json({ message: 'Notification deleted' });
+        } catch (err) {
+            console.error('Delete notification error:', err);
+            return res.status(500).json({ error: 'Failed to delete notification' });
+        }
+    }
+
+    static async deleteAllNotifications (req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        try {
+            const userId = userData._id;
+
+            const result = await NotificationService.deleteAllNotifications(userId);
+            if (!result) return res.status(404).json({ error: 'No notifications found' });
+
+            return res.status(200).json({ message: 'All notifications deleted' });
+        } catch (err) {
+            console.error('Delete all notifications error:', err);
+            return res.status(500).json({ error: 'Failed to delete all notifications' });
         }
     }
 

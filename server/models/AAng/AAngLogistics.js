@@ -965,7 +965,7 @@ const AAngSchema = new Schema({
     pinVerificationToken: {
         token: String,
         email: String,
-        purpose: {type: String, enum: ['CHANGE_PIN', 'RESET_PIN']},
+        purpose: {type: String, enum: ['CHANGE_PIN',  'RESET_PIN', 'SET_PIN']},
         createdAt: {type: Date},
         expiresAt: {
             type: Date,

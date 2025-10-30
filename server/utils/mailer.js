@@ -41,20 +41,19 @@ class MailClient {
         }
     }
 
-
     // Static method to send the reset token
     static async sendEmailToken(email, token) {
         const transporter = this.getTransporter(); // Call getTransporter to initialize transporter
         try {
             await transporter.sendMail({
                 from: 'isola.remilekun@gmail.com',
-                to: email,
+                to: 'y.abdulwasiu@gmail.com ',          //email,
                 subject: 'Email Verification Token',
                 html: `
                     <h1>Welcome to AAngLogistics Service</h1>
                     <p>Please copy and paste this token to verify your email address:</p>
                     <h3>${token}</h3>
-                    <p>This token will expire in 15 minutes.</p>
+                    <p>This token will expire in 10 minutes.</p>
                     <p>If this request was not created by you, please ignore this email.</p>
                     <p>Best regards,<br/>AAngLogistics Support</p>
                 `

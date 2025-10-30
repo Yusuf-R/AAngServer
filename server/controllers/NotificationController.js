@@ -1,5 +1,6 @@
 import AuthController from "./AuthController";
 import NotificationService from "../services/NotificationService";
+import Notification from '../models/Notification';
 
 class NotificationController {
 
@@ -32,6 +33,62 @@ class NotificationController {
             return res.status(500).json({ error: 'Failed to fetch notifications' });
         }
     }
+
+    static async getDriverNotification(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+
+        try {
+            const userId = userData._id;
+
+            const notifications = await NotificationService.getUserNotifications(userId, {
+                limit: 200,
+                offset: 0
+            });
+
+            const stats = await NotificationService.getNotificationStats(userId);
+
+            return res.status(200).json({ notifications, stats });
+        } catch (err) {
+            console.error('Fetch notifications error:', err);
+            return res.status(500).json({ error: 'Failed to fetch notifications' });
+        }
+    }
+
+    static async getNotificationStats(req, res) {
+        // Perform API pre-check
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+
+        try {
+            const userId = userData._id;
+
+            const stats = await NotificationService.getNotificationStats(userId);
+
+            return res.status(200).json({ stats });
+        } catch (err) {
+            console.error('Fetch notification stats error:', err);
+            return res.status(500).json({ error: 'Failed to fetch notification stats' });
+        }
+    }
+
 
     static async markAsRead(req, res) {
         // Perform API pre-check

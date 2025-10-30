@@ -24,6 +24,17 @@ driverRouter.put('/location/update', driverController.updateLocation);
 driverRouter.delete('/location/delete', driverController.deleteLocation);
 driverRouter.patch('/tcs', driverController.tcsAcceptance);
 
+// verification
+// email
+driverRouter.post('/auth/get/token', driverController.getToken);
+driverRouter.post('/auth/verify/auth-token', driverController.verifyAuthPinToken);
+driverRouter.post('/auth/set/auth-pin', driverController.setAuthPin);
+driverRouter.post('/auth/verify/email', driverController.verifyEmail);
+
+// // password
+driverRouter.post('/auth/password/reset', driverController.resetPassword);
+// driverRouter.post('/auth/password/reset-password', driverController.emailResetPassword);
+
 // data validation
 driverRouter.get('/verification/status', driverController.verificationStatus);
 driverRouter.patch('/verification/submit', driverController.submitVerification);
@@ -36,5 +47,14 @@ driverRouter.post('/support/ticket/create', ticketController.createTicket);
 driverRouter.get('/support/ticket/all', ticketController.getAllUserTicket);
 driverRouter.get('/support/ticket/get', ticketController.getTicketById);
 driverRouter.delete('/support/ticket/delete', ticketController.deleteTicket);
+
+// notification
+driverRouter.get('/notification/all', driverController.getDriverNotification);
+driverRouter.get('/notification/stats', driverController.getNotificationStats);
+driverRouter.delete('/notification/delete', driverController.deleteNotification);
+driverRouter.delete('/notification/delete/all', driverController.deleteAllNotifications);
+driverRouter.patch('/notification/mark-as-read', driverController.markAsRead);
+driverRouter.patch('/notification/mark-all-as-read', driverController.markAllAsRead);
+
 
 module.exports = driverRouter;
