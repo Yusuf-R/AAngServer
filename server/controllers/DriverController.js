@@ -17,25 +17,25 @@ class DriverController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { status } = req.body;
+        const {userData} = preCheckResult;
+        const {status} = req.body;
 
         if (!status) {
-            return res.status(400).json({ error: "Missing required fields" });
+            return res.status(400).json({error: "Missing required fields"});
         }
 
         const dbStatus = ["online", "offline", "on-ride", "break", "maintenance"];
 
         if (!dbStatus.includes(status)) {
-            return res.status(400).json({ error: "Unknown status instruction" });
+            return res.status(400).json({error: "Unknown status instruction"});
         }
 
         try {
-            const { Driver } = await getModels();
+            const {Driver} = await getModels();
 
 
             // Enhanced update with operational status
@@ -52,12 +52,12 @@ class DriverController {
 
             const updatedUser = await Driver.findByIdAndUpdate(
                 userData._id,
-                { $set: updateData },
-                { new: true }
+                {$set: updateData},
+                {new: true}
             );
 
             if (!updatedUser) {
-                return res.status(404).json({ error: "User not found" });
+                return res.status(404).json({error: "User not found"});
             }
 
             console.log('Driver status updated successfully');
@@ -66,7 +66,7 @@ class DriverController {
             const dashboardData = await DriverController.userDashBoardData(updatedUser);
 
             if (!dashboardData) {
-                return res.status(404).json({ error: "Dashboard data not found" });
+                return res.status(404).json({error: "Dashboard data not found"});
             }
 
             return res.status(201).json({
@@ -134,8 +134,8 @@ class DriverController {
 
     static async userDashBoardData(userObject, flag = null) {
         let orderData, orderAssignments, activeOrder, recentOrders;
-        const { AAngBase } = await getModels();
-        const { Order, OrderAssignment } = await getOrderModels();
+        const {AAngBase} = await getModels();
+        const {Order, OrderAssignment} = await getOrderModels();
 
         // Populate user with all necessary data
         const user = await AAngBase.findById(userObject._id)
@@ -161,7 +161,7 @@ class DriverController {
                 'driverAssignment.driverId': user._id,
                 status: 'delivered'
             })
-                .sort({ 'driverAssignment.actualTimes.deliveredAt': -1 })
+                .sort({'driverAssignment.actualTimes.deliveredAt': -1})
                 .limit(10)
                 .populate('clientId', 'fullName phoneNumber')
                 .select('orderRef status pricing package location driverAssignment rating createdAt')
@@ -232,6 +232,7 @@ class DriverController {
             phoneNumber: user.phoneNumber,
             gender: user.gender,
             dob: user.dob ? new Date(user.dob).toISOString() : null,
+            savedLocations: user.savedLocations || [],
             address: user.address,
             state: user.state,
             lga: user.lga,
@@ -412,18 +413,18 @@ class DriverController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
+        const {userData} = preCheckResult;
 
         try {
-            const { AAngBase } = await getModels();
+            const {AAngBase} = await getModels();
             const user = await AAngBase.findById(userData._id);
 
             if (!user) {
-                return res.status(404).json({ error: 'User not found' });
+                return res.status(404).json({error: 'User not found'});
             }
 
             // Get comprehensive dashboard data with order information
@@ -652,7 +653,7 @@ class DriverController {
         }
         const validReqTypes = ['EmailVerification', 'PasswordReset', 'PinVerification'];
         if (!reqType || !validReqTypes.includes(reqType)) {
-            return res.status(400).json({ error: 'Invalid reqType of token request' });
+            return res.status(400).json({error: 'Invalid reqType of token request'});
         }
         if (reqType === 'EmailVerification' && user.emailVerified) {
             return res.status(400).json({error: 'Email is already verified'});
@@ -791,7 +792,7 @@ class DriverController {
         }
     }
 
-    static async  verifyToken(reqType, token) {
+    static async verifyToken(reqType, token) {
         const {AAngBase} = await getModels();
 
         switch (reqType) {
@@ -914,7 +915,7 @@ class DriverController {
         }
     }
 
-    static async verifyAuthPinToken (req, res) {
+    static async verifyAuthPinToken(req, res) {
         // Perform API pre-check
         const preCheckResult = await AuthController.apiPreCheck(req);
 
@@ -1033,10 +1034,14 @@ class DriverController {
 
         const {userData} = preCheckResult;
         const updateData = req.body;
-        const locationData = {
-            _id: updateData.id,
-            ...updateData.data
+        if (!updateData) {
+            return res.status(400).json({error: "Location data is required."});
         }
+        const locationData = {
+            _id: updateData.locationId,
+            ...updateData,
+        }
+        delete locationData.locationId;
 
         // Validate input parameters
         if (!locationData) {
@@ -1056,9 +1061,9 @@ class DriverController {
             }
             const {AAngBase} = await getModels();
             const updatedUser = await AAngBase.findOneAndUpdate(
-                { _id: userData._id, 'savedLocations._id': locationData._id },
-                { $set: {'savedLocations.$': locationData }},
-                { new: true }
+                {_id: userData._id, 'savedLocations._id': locationData._id},
+                {$set: {'savedLocations.$': locationData}},
+                {new: true}
             );
             if (!updatedUser) {
                 return res.status(404).json({error: "User or location not found"});
@@ -1109,7 +1114,7 @@ class DriverController {
         }
 
         // Validate ObjectId format
-        if (!mongoose.Types.ObjectId.isValid(locationData._id)) {
+        if (!mongoose.Types.ObjectId.isValid(locationData.locationId)) {
             return res.status(400).json({error: "Invalid location ID format."});
         }
 
@@ -1119,7 +1124,7 @@ class DriverController {
             // First, check if the location exists and belongs to the user
             const userWithLocation = await AAngBase.findOne({
                 _id: userData._id,
-                'savedLocations._id': locationData._id,
+                'savedLocations._id': locationData.locationId,
                 role: 'Driver'
             }, {
                 'savedLocations.$': 1
@@ -1139,7 +1144,7 @@ class DriverController {
                 },
                 {
                     $pull: {
-                        savedLocations: {_id: locationData._id}
+                        savedLocations: {_id: locationData.locationId}
                     }
                 },
                 {
@@ -1276,28 +1281,25 @@ class DriverController {
     }
 
     // data validation
-    static async verificationStatus (req, res) {
+    static async verificationStatus(req, res) {
         const preCheckResult = await AuthController.apiPreCheck(req);
 
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
+        const {userData} = preCheckResult;
 
         try {
-            const { Driver } = await getModels();
+            const {Driver} = await getModels();
             const driver = await Driver.findById(userData._id).select('verification');
 
             if (!driver) {
-                return res.status(404).json({ message: 'Driver not found' });
+                return res.status(404).json({message: 'Driver not found'});
             }
-            console.log({
-                de: driver
-            })
 
             return res.status(200).json({
                 success: true,
@@ -1339,22 +1341,22 @@ class DriverController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
+        const {userData} = preCheckResult;
 
         try {
-            const { Driver } = await getModels();
+            const {Driver} = await getModels();
             const driver = await Driver.findById(userData._id);
 
             if (!driver) {
-                return res.status(404).json({ message: 'Driver not found' });
+                return res.status(404).json({message: 'Driver not found'});
             }
 
             // Extract and validate payload
-            const { basicInfo, specificDocs } = req.body;
+            const {basicInfo, specificDocs} = req.body;
 
             // Validate required fields
             if (!basicInfo || !specificDocs) {
@@ -1742,10 +1744,10 @@ class DriverController {
 
             const stats = await NotificationService.getNotificationStats(userId);
 
-            return res.status(200).json({ notifications, stats });
+            return res.status(200).json({notifications, stats});
         } catch (err) {
             console.error('Fetch notifications error:', err);
-            return res.status(500).json({ error: 'Failed to fetch notifications' });
+            return res.status(500).json({error: 'Failed to fetch notifications'});
         }
     }
 
@@ -1767,10 +1769,10 @@ class DriverController {
 
             const stats = await NotificationService.getNotificationStats(userId);
 
-            return res.status(200).json({ stats });
+            return res.status(200).json({stats});
         } catch (err) {
             console.error('Fetch notification stats error:', err);
-            return res.status(500).json({ error: 'Failed to fetch notification stats' });
+            return res.status(500).json({error: 'Failed to fetch notification stats'});
         }
     }
 
@@ -1788,17 +1790,17 @@ class DriverController {
 
         const {userData} = preCheckResult;
         try {
-            const { id } = req.body;
-            if (!id) return res.status(400).json({ error: 'Notification ID is required' });
+            const {id} = req.body;
+            if (!id) return res.status(400).json({error: 'Notification ID is required'});
 
             const notification = await Notification.findById(id);
-            if (!notification) return res.status(404).json({ error: 'Notification not found' });
+            if (!notification) return res.status(404).json({error: 'Notification not found'});
 
             await notification.markAsRead();
-            return res.status(200).json({ message: 'Notification marked as read' });
+            return res.status(200).json({message: 'Notification marked as read'});
         } catch (err) {
             console.error('Mark as read error:', err);
-            return res.status(500).json({ error: 'Failed to mark notification as read' });
+            return res.status(500).json({error: 'Failed to mark notification as read'});
         }
 
     }
@@ -1819,12 +1821,12 @@ class DriverController {
             const userId = userData._id;
 
             const result = await NotificationService.markAllAsRead(userId);
-            if (!result) return res.status(404).json({ error: 'No unread notifications found' });
+            if (!result) return res.status(404).json({error: 'No unread notifications found'});
 
-            return res.status(200).json({ message: 'All notifications marked as read' });
+            return res.status(200).json({message: 'All notifications marked as read'});
         } catch (err) {
             console.error('Mark all as read error:', err);
-            return res.status(500).json({ error: 'Failed to mark all notifications as read' });
+            return res.status(500).json({error: 'Failed to mark all notifications as read'});
         }
     }
 
@@ -1844,10 +1846,10 @@ class DriverController {
             const userId = userData._id;
 
             const unreadCount = await NotificationService.getUnreadCount(userId);
-            return res.status(200).json({ unreadCount });
+            return res.status(200).json({unreadCount});
         } catch (err) {
             console.error('Get unread count error:', err);
-            return res.status(500).json({ error: 'Failed to get unread count' });
+            return res.status(500).json({error: 'Failed to get unread count'});
         }
     }
 
@@ -1864,22 +1866,22 @@ class DriverController {
 
         const {userData} = preCheckResult;
         const {id} = req.body;
-        if(!id) {
-            return res.status(400).json({ error: 'Notification ID is required' });
+        if (!id) {
+            return res.status(400).json({error: 'Notification ID is required'});
         }
         try {
             const notification = await Notification.findById(id);
-            if (!notification) return res.status(404).json({ error: 'Notification not found' });
+            if (!notification) return res.status(404).json({error: 'Notification not found'});
 
             await notification.softDelete();
-            return res.status(200).json({ message: 'Notification deleted' });
+            return res.status(200).json({message: 'Notification deleted'});
         } catch (err) {
             console.error('Delete notification error:', err);
-            return res.status(500).json({ error: 'Failed to delete notification' });
+            return res.status(500).json({error: 'Failed to delete notification'});
         }
     }
 
-    static async deleteAllNotifications (req, res) {
+    static async deleteAllNotifications(req, res) {
         // Perform API pre-check
         const preCheckResult = await AuthController.apiPreCheck(req);
 
@@ -1895,12 +1897,12 @@ class DriverController {
             const userId = userData._id;
 
             const result = await NotificationService.deleteAllNotifications(userId);
-            if (!result) return res.status(404).json({ error: 'No notifications found' });
+            if (!result) return res.status(404).json({error: 'No notifications found'});
 
-            return res.status(200).json({ message: 'All notifications deleted' });
+            return res.status(200).json({message: 'All notifications deleted'});
         } catch (err) {
             console.error('Delete all notifications error:', err);
-            return res.status(500).json({ error: 'Failed to delete all notifications' });
+            return res.status(500).json({error: 'Failed to delete all notifications'});
         }
     }
 
