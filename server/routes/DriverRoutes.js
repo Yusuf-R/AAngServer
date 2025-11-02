@@ -56,5 +56,8 @@ driverRouter.delete('/notification/delete/all', driverController.deleteAllNotifi
 driverRouter.patch('/notification/mark-as-read', driverController.markAsRead);
 driverRouter.patch('/notification/mark-all-as-read', driverController.markAllAsRead);
 
+// orders
+driverRouter.get('/orders/get/available', driverController.getAvailableOrders);
+
 
 module.exports = driverRouter;

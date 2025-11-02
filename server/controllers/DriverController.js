@@ -1906,6 +1906,1148 @@ class DriverController {
         }
     }
 
+
+    /**
+     * Haversine formula to calculate distance between two coordinates
+     * Returns distance in kilometers
+     */
+    static calculateDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371; // Earth's radius in km
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const a =
+            Math.sin(dLat/2) * Math.sin(dLat/2) +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+            Math.sin(dLon/2) * Math.sin(dLon/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        return R * c;
+    }
+
+    /**
+     * Calculate ETA based on distance and traffic conditions
+     * Returns estimated time in minutes
+     */
+    static calculateETA(distanceKm, trafficFactor = 1.2) {
+        // Average speeds by vehicle type (km/h)
+        const averageSpeeds = {
+            bicycle: 15,
+            motorcycle: 35,
+            tricycle: 30,
+            car: 40,
+            van: 35,
+            truck: 30
+        };
+
+        // Use motorcycle speed as default
+        const avgSpeed = averageSpeeds.motorcycle || 35;
+
+        // Base time + traffic factor + buffer
+        const baseTime = (distanceKm / avgSpeed) * 60; // Convert to minutes
+        const withTraffic = baseTime * trafficFactor;
+        const withBuffer = withTraffic * 1.15; // 15% buffer
+
+        return Math.ceil(withBuffer);
+    }
+
+    /**
+     * GET /driver/available-orders
+     * Fetch available orders based on driver's location and preferences
+     */
+    static async getAvailableOrders(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+
+        // Extract query parameters
+        const {
+            lat,
+            lng,
+            area = 'territorial', // 'current' | 'territorial'
+            radius = 15, // km (for 'current' mode)
+            vehicleFilter,
+            priorityFilter = 'all',
+            maxDistance = 10
+        } = req.query;
+
+        // Validate required fields
+        if (!lat || !lng) {
+            return res.status(400).json({
+                error: "Driver location (lat, lng) is required"
+            });
+        }
+        console.log({
+            pt: req.query
+        })
+
+        const driverLat = parseFloat(lat);
+        const driverLng = parseFloat(lng);
+
+        if (isNaN(driverLat) || isNaN(driverLng)) {
+            return res.status(400).json({
+                error: "Invalid coordinates"
+            });
+        }
+
+        try {
+            const { Order } = await getOrderModels();
+
+            // Get driver's operational areas
+            const operationalLGA = userData.verification?.basicVerification?.operationalArea?.lga;
+            const operationalState = userData.verification?.basicVerification?.operationalArea?.state;
+
+            console.log({
+                operationalLGA,
+                operationalState,
+                driverLocation: { driverLat, driverLng }
+            });
+
+            if (!operationalLGA || !operationalState) {
+                return res.status(400).json({
+                    error: "Driver operational area (LGA and State) not properly configured"
+                });
+            }
+
+            // Build base query
+            const query = {
+                status: 'broadcast',
+                'payment.status': 'paid'
+            };
+
+            // AREA FILTERING - INTELLIGENT MATCHING
+            if (area === 'current') {
+                // CURRENT MODE: Match orders within radius AND same LGA
+                const radiusInMeters = parseFloat(radius) * 1000;
+
+                query['location.pickUp.coordinates'] = {
+                    $near: {
+                        $geometry: {
+                            type: 'Point',
+                            coordinates: [driverLng, driverLat]
+                        },
+                        $maxDistance: radiusInMeters
+                    }
+                };
+
+                // Additional LGA matching for precision
+                query['location.pickUp.lga'] = operationalLGA;
+
+            } else if (area === 'territorial') {
+                // TERRITORIAL MODE: Match orders within entire state
+                query['location.pickUp.state'] = operationalState;
+
+                // Optional: Add LGA preference for territorial mode
+                // This gives priority to orders in driver's preferred LGA
+                // query['location.pickUp.lga'] = operationalLGA;
+            }
+
+            // VEHICLE FILTER
+            if (vehicleFilter) {
+                const vehicles = Array.isArray(vehicleFilter)
+                    ? vehicleFilter
+                    : vehicleFilter.split(',').map(v => v.trim());
+
+                if (vehicles.length > 0) {
+                    query.vehicleRequirements = { $in: vehicles };
+                }
+            }
+
+            // PRIORITY FILTER
+            if (priorityFilter === 'urgent') {
+                query.priority = 'urgent';
+            } else if (priorityFilter === 'high_priority') {
+                query.priority = { $in: ['high', 'urgent'] };
+            }
+
+            console.log({query});
+
+            // FETCH ORDERS
+            const orders = await Order.find(query)
+                .sort({
+                    priority: -1,  // Urgent first
+                    createdAt: 1   // Oldest first
+                })
+                .limit(50)
+                .select([
+                    '_id',
+                    'orderRef',
+                    'clientId',
+                    'priority',
+                    'orderType',
+                    'vehicleRequirements',
+                    'location.pickUp',
+                    'location.dropOff',
+                    'package.category',
+                    'package.weight',
+                    'package.isFragile',
+                    'pricing.totalAmount',
+                    'pricing.currency',
+                    'createdAt',
+                    'scheduledPickup'
+                ])
+                .lean();
+
+            console.log({orders});
+
+
+            // CALCULATE DISTANCES AND ENHANCE ORDER DATA
+            const ordersWithDistance = orders.map(order => {
+                const pickupLng = order.location.pickUp.coordinates.coordinates[0];
+                const pickupLat = order.location.pickUp.coordinates.coordinates[1];
+
+                const distance = DriverController.calculateDistance(
+                    driverLat,
+                    driverLng,
+                    pickupLat,
+                    pickupLng
+                );
+
+                const estimatedETA = DriverController.calculateETA(
+                    distance,
+                    1.2 // Traffic factor
+                );
+
+                // Determine area match type for frontend display
+                let areaMatchType;
+
+                if (area === 'current') {
+                    // Query: radius + LGA filter
+                    areaMatchType = 'local_lga';
+                } else if (area === 'territorial') {
+                    // Query: state filter only
+                    if (order.location.pickUp.lga === operationalLGA) {
+                        areaMatchType = 'same_lga'; // Bonus - same LGA within state
+                    } else {
+                        areaMatchType = 'same_state'; // Different LGA but same state
+                    }
+                }
+
+                console.log({
+                    distance,
+                    estimatedETA
+
+                })
+
+
+                return {
+                    ...order,
+                    distance: parseFloat(distance.toFixed(2)),
+                    estimatedPickupTime: estimatedETA,
+                    areaMatchType,
+                    canAcceptFromCurrentLocation: distance <= parseFloat(maxDistance),
+                    warningMessage: distance > parseFloat(maxDistance)
+                        ? `Order is ${distance.toFixed(1)}km away. Move closer to accept.`
+                        : null
+                };
+            })
+                .filter(order => order.distance <= parseFloat(maxDistance) * 1.5)
+                .sort((a, b) => {
+                    // Sort by: 1. Area match type, 2. Distance
+                    const areaPriority = {
+                        'local_lga': 1,
+                        'preferred_lga': 2,
+                        'state_wide': 3
+                    };
+
+                    if (areaPriority[a.areaMatchType] !== areaPriority[b.areaMatchType]) {
+                        return areaPriority[a.areaMatchType] - areaPriority[b.areaMatchType];
+                    }
+                    return a.distance - b.distance;
+                });
+
+            console.log({ordersWithDistance});
+
+            return res.status(200).json({
+                success: true,
+                orders: ordersWithDistance,
+                count: ordersWithDistance.length,
+                metadata: {
+                    driverLocation: { lat: driverLat, lng: driverLng },
+                    operationalArea: {
+                        lga: operationalLGA,
+                        state: operationalState
+                    },
+                    searchMode: area,
+                    searchRadius: area === 'current' ? parseFloat(radius) : null,
+                    maxDistance: parseFloat(maxDistance),
+                    filters: {
+                        vehicles: vehicleFilter || 'all',
+                        priority: priorityFilter
+                    }
+                }
+            });
+
+        } catch (error) {
+            console.error('Get available orders error:', error);
+            return res.status(500).json({
+                error: "An error occurred while fetching orders"
+            });
+        }
+    }
+
+    /**
+     * POST /driver/accept-order
+     * Driver accepts an order with location verification
+     */
+    static async acceptOrder(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { orderId, currentLocation } = req.body;
+
+        // Validate input
+        if (!orderId || !currentLocation?.lat || !currentLocation?.lng) {
+            return res.status(400).json({
+                error: "Order ID and current location are required"
+            });
+        }
+
+        try {
+            const { Order } = await getOrderModels();
+            const { Driver } = await getModels();
+
+            // Fetch order
+            const order = await Order.findById(orderId);
+
+            if (!order) {
+                return res.status(404).json({ error: "Order not found" });
+            }
+
+            // Check if order is still available
+            if (order.status !== 'broadcast') {
+                return res.status(400).json({
+                    error: "Order is no longer available",
+                    currentStatus: order.status
+                });
+            }
+
+            // Check if payment is confirmed
+            if (order.payment.status !== 'paid') {
+                return res.status(400).json({
+                    error: "Order payment not confirmed"
+                });
+            }
+
+            // Calculate distance from driver to pickup
+            const pickupLng = order.location.pickUp.coordinates.coordinates[0];
+            const pickupLat = order.location.pickUp.coordinates.coordinates[1];
+
+            const distanceToPickup = DriverController.calculateDistance(
+                currentLocation.lat,
+                currentLocation.lng,
+                pickupLat,
+                pickupLng
+            );
+
+            // Calculate ETA
+            const estimatedETA = DriverController.calculateETA(distanceToPickup);
+
+            // Store acceptance data for penalty calculation
+            const acceptanceData = {
+                acceptedLocation: {
+                    lat: currentLocation.lat,
+                    lng: currentLocation.lng,
+                    accuracy: currentLocation.accuracy || 0,
+                    timestamp: new Date()
+                },
+                distanceToPickup,
+                estimatedETA,
+                maxAllowedETA: Math.ceil(estimatedETA * 1.5) // 50% buffer for traffic/delays
+            };
+
+            // Update order with driver assignment
+            order.status = 'assigned';
+            order.driverAssignment = {
+                driverId: userData._id,
+                driverInfo: {
+                    name: userData.fullName,
+                    phone: userData.phoneNumber,
+                    vehicleType: userData.vehicleDetails.type,
+                    vehicleNumber: userData.vehicleDetails.plateNumber,
+                    rating: userData.performance.averageRating
+                },
+                currentLocation: {
+                    lat: currentLocation.lat,
+                    lng: currentLocation.lng,
+                    accuracy: currentLocation.accuracy || 0,
+                    timestamp: new Date()
+                },
+                route: [{
+                    lat: currentLocation.lat,
+                    lng: currentLocation.lng,
+                    timestamp: new Date(),
+                    speed: 0
+                }],
+                estimatedArrival: {
+                    pickup: new Date(Date.now() + estimatedETA * 60000), // Convert minutes to ms
+                    dropoff: null // Will be set after pickup
+                },
+                actualTimes: {
+                    assignedAt: new Date(),
+                    pickedUpAt: null,
+                    inTransitAt: null,
+                    deliveredAt: null
+                },
+                distance: {
+                    total: distanceToPickup,
+                    remaining: distanceToPickup,
+                    unit: 'km'
+                },
+                duration: {
+                    estimated: estimatedETA,
+                    actual: null
+                },
+                status: 'assigned',
+                responseTime: 0 // Can calculate from broadcast time
+            };
+
+            // Add tracking history entry
+            order.orderTrackingHistory.push({
+                status: 'driver_assigned',
+                timestamp: new Date(),
+                title: 'Driver Assigned',
+                description: `${userData.fullName} has accepted your order`,
+                icon: '🚗',
+                metadata: {
+                    driverId: userData._id,
+                    driverName: userData.fullName,
+                    vehicleType: userData.vehicleDetails.type,
+                    vehicleNumber: userData.vehicleDetails.plateNumber,
+                    eta: estimatedETA,
+                    distance: distanceToPickup,
+                    location: {
+                        lat: currentLocation.lat,
+                        lng: currentLocation.lng
+                    }
+                },
+                updatedBy: {
+                    role: 'driver',
+                    name: userData.fullName
+                },
+                isCompleted: true,
+                isCurrent: true
+            });
+
+            // Store acceptance metadata for penalty tracking
+            order.metadata = order.metadata || {};
+            order.metadata.acceptanceData = acceptanceData;
+
+            await order.save();
+
+            // Update driver status
+            await Driver.findByIdAndUpdate(
+                userData._id,
+                {
+                    $set: {
+                        availabilityStatus: 'on-ride',
+                        'operationalStatus.currentOrderId': order._id,
+                        'operationalStatus.lastActiveAt': new Date(),
+                        'currentLocation.coordinates': {
+                            lat: currentLocation.lat,
+                            lng: currentLocation.lng
+                        },
+                        'currentLocation.accuracy': currentLocation.accuracy || 0,
+                        'currentLocation.timestamp': new Date()
+                    }
+                }
+            );
+
+            // TODO: Send notifications to client
+            // TODO: Create OrderAssignment record
+            // TODO: Notify other drivers that order is taken
+
+            return res.status(200).json({
+                success: true,
+                message: "Order accepted successfully",
+                order: {
+                    _id: order._id,
+                    orderRef: order.orderRef,
+                    status: order.status,
+                    pickupLocation: order.location.pickUp,
+                    dropoffLocation: order.location.dropOff,
+                    estimatedPickupTime: estimatedETA,
+                    maxAllowedTime: acceptanceData.maxAllowedETA,
+                    package: order.package,
+                    pricing: order.pricing
+                },
+                warning: distanceToPickup > 10
+                    ? "You're quite far from pickup location. Ensure timely arrival to avoid penalties."
+                    : null
+            });
+
+        } catch (error) {
+            console.error('Accept order error:', error);
+            return res.status(500).json({
+                error: "An error occurred while accepting order"
+            });
+        }
+    }
+
+    /**
+     * POST /driver/update-location
+     * Update driver location during active delivery
+     */
+    static async updateLocation(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { orderId, location } = req.body;
+
+        if (!orderId || !location?.lat || !location?.lng) {
+            return res.status(400).json({
+                error: "Order ID and location are required"
+            });
+        }
+
+        try {
+            const { Order } = await getOrderModels();
+            const { Driver } = await getModels();
+
+            const order = await Order.findById(orderId);
+
+            if (!order) {
+                return res.status(404).json({ error: "Order not found" });
+            }
+
+            // Verify this driver is assigned to this order
+            if (order.driverAssignment.driverId.toString() !== userData._id.toString()) {
+                return res.status(403).json({
+                    error: "You are not assigned to this order"
+                });
+            }
+
+            // Update driver's current location in order
+            order.driverAssignment.currentLocation = {
+                lat: location.lat,
+                lng: location.lng,
+                accuracy: location.accuracy || 0,
+                timestamp: new Date()
+            };
+
+            // Add to route history
+            order.driverAssignment.route.push({
+                lat: location.lat,
+                lng: location.lng,
+                timestamp: new Date(),
+                speed: location.speed || 0
+            });
+
+            // Calculate remaining distance to pickup/dropoff
+            if (order.status === 'assigned' || order.status === 'en_route_pickup') {
+                // Distance to pickup
+                const pickupLng = order.location.pickUp.coordinates.coordinates[0];
+                const pickupLat = order.location.pickUp.coordinates.coordinates[1];
+
+                const remaining = DriverController.calculateDistance(
+                    location.lat,
+                    location.lng,
+                    pickupLat,
+                    pickupLng
+                );
+
+                order.driverAssignment.distance.remaining = remaining;
+
+                // Check if driver arrived at pickup (within 100m)
+                if (remaining < 0.1 && order.status !== 'arrived_pickup') {
+                    order.status = 'arrived_pickup';
+
+                    // Add tracking history
+                    order.orderTrackingHistory.push({
+                        status: 'arrived_at_pickup',
+                        timestamp: new Date(),
+                        title: 'Driver Arrived',
+                        description: 'Driver has arrived at pickup location',
+                        icon: '📍',
+                        updatedBy: {
+                            role: 'system',
+                            name: 'AAngLogistics System'
+                        },
+                        isCompleted: true,
+                        isCurrent: true
+                    });
+                }
+            }
+
+            await order.save();
+
+            // Update driver document
+            await Driver.findByIdAndUpdate(
+                userData._id,
+                {
+                    $set: {
+                        'currentLocation.coordinates': {
+                            lat: location.lat,
+                            lng: location.lng
+                        },
+                        'currentLocation.accuracy': location.accuracy || 0,
+                        'currentLocation.speed': location.speed || 0,
+                        'currentLocation.isMoving': (location.speed || 0) > 1,
+                        'currentLocation.timestamp': new Date(),
+                        'operationalStatus.lastLocationUpdate': new Date()
+                    }
+                }
+            );
+
+            return res.status(200).json({
+                success: true,
+                message: "Location updated successfully"
+            });
+
+        } catch (error) {
+            console.error('Update location error:', error);
+            return res.status(500).json({
+                error: "An error occurred while updating location"
+            });
+        }
+    }
+
+    /**
+     * POST /driver/location-lost
+     * Notify system when location tracking is lost
+     */
+    static async notifyLocationLoss(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { orderId, lastKnownLocation, failureCount } = req.body;
+
+        if (!orderId) {
+            return res.status(400).json({ error: "Order ID is required" });
+        }
+
+        try {
+            const { Order } = await getOrderModels();
+
+            const order = await Order.findById(orderId);
+
+            if (!order) {
+                return res.status(404).json({ error: "Order not found" });
+            }
+
+            // Log location loss incident
+            order.communications.push({
+                type: 'system',
+                recipient: 'admin',
+                content: `Location tracking lost for driver ${userData.fullName}. Failure count: ${failureCount}. Last known: ${JSON.stringify(lastKnownLocation)}`,
+                sentAt: new Date(),
+                status: 'sent'
+            });
+
+            await order.save();
+
+            // TODO: Send alert to admin dashboard
+            // TODO: Send SMS to client if failure persists
+
+            return res.status(200).json({
+                success: true,
+                message: "Location loss reported",
+                action: failureCount >= 5
+                    ? "Admin has been notified. Please restore GPS connection."
+                    : "Attempting to reconnect..."
+            });
+
+        } catch (error) {
+            console.error('Location loss notification error:', error);
+            return res.status(500).json({
+                error: "An error occurred while reporting location loss"
+            });
+        }
+    }
+
+    /**
+     * POST /driver/confirm-pickup
+     * Driver confirms package pickup and validates timing
+     */
+    static async confirmPickup(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { orderId, location, photos } = req.body;
+
+        if (!orderId || !location) {
+            return res.status(400).json({
+                error: "Order ID and location are required"
+            });
+        }
+
+        try {
+            const { Order } = await getOrderModels();
+
+            const order = await Order.findById(orderId);
+
+            if (!order) {
+                return res.status(404).json({ error: "Order not found" });
+            }
+
+            const now = new Date();
+            const acceptanceData = order.metadata?.acceptanceData;
+
+            // Calculate penalty if driver was dishonest about location
+            let penalty = null;
+            if (acceptanceData) {
+                const actualArrivalTime = (now - acceptanceData.acceptedLocation.timestamp) / 60000; // minutes
+                const expectedMaxTime = acceptanceData.maxAllowedETA;
+
+                if (actualArrivalTime > expectedMaxTime) {
+                    // Driver took longer than expected
+                    const delay = actualArrivalTime - expectedMaxTime;
+                    const delayPercentage = (delay / expectedMaxTime) * 100;
+
+                    if (delayPercentage > 20) {
+                        // Significant delay - likely lied about location
+                        penalty = {
+                            type: 'location_dishonesty',
+                            amount: Math.min(delayPercentage * 10, 500), // Cap at 500 NGN
+                            reason: `Arrived ${Math.ceil(delay)} minutes late. Expected location dishonesty.`,
+                            deducted: false
+                        };
+
+                        // Store penalty for later deduction from earnings
+                        order.metadata.penalty = penalty;
+                    }
+                }
+            }
+
+            // Update order status
+            order.status = 'picked_up';
+            order.driverAssignment.actualTimes.pickedUpAt = now;
+            order.pickupConfirmation = {
+                confirmedBy: {
+                    name: userData.fullName,
+                    phone: userData.phoneNumber
+                },
+                confirmedAt: now,
+                photos: photos || [],
+                signature: null // Can add signature later
+            };
+
+            // Add tracking history
+            order.orderTrackingHistory.push({
+                status: 'package_picked_up',
+                timestamp: now,
+                title: 'Package Picked Up',
+                description: 'Driver has collected the package',
+                icon: '📦',
+                updatedBy: {
+                    role: 'driver',
+                    name: userData.fullName
+                },
+                isCompleted: true,
+                isCurrent: true
+            });
+
+            await order.save();
+
+            return res.status(200).json({
+                success: true,
+                message: "Pickup confirmed",
+                order: {
+                    _id: order._id,
+                    orderRef: order.orderRef,
+                    status: order.status,
+                    dropoffLocation: order.location.dropOff
+                },
+                penalty: penalty ? {
+                    warning: penalty.reason,
+                    amount: penalty.amount,
+                    note: "This will be deducted from your delivery earnings"
+                } : null
+            });
+
+        } catch (error) {
+            console.error('Confirm pickup error:', error);
+            return res.status(500).json({
+                error: "An error occurred while confirming pickup"
+            });
+        }
+    }
+    /**
+     * POST /driver/confirm-delivery
+     * Driver confirms delivery completion and verifies token
+     */
+    static async confirmDelivery(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { orderId, deliveryToken, photos, signature, verifiedBy } = req.body;
+
+        if (!orderId || !deliveryToken) {
+            return res.status(400).json({
+                error: "Order ID and delivery token are required"
+            });
+        }
+
+        try {
+            const { Order } = await getOrderModels();
+            const { Driver } = await getModels();
+
+            const order = await Order.findById(orderId);
+
+            if (!order) {
+                return res.status(404).json({ error: "Order not found" });
+            }
+
+            // Verify delivery token
+            if (order.deliveryToken !== deliveryToken) {
+                return res.status(400).json({
+                    error: "Invalid delivery token",
+                    attemptsLeft: 2 // Implement attempt tracking
+                });
+            }
+
+            const now = new Date();
+
+            // Update order status
+            order.status = 'delivered';
+            order.driverAssignment.actualTimes.deliveredAt = now;
+            order.tokenVerified = {
+                verified: true,
+                verifiedAt: now,
+                verifiedBy: verifiedBy
+            };
+            order.deliveryConfirmation = {
+                photos: photos || [],
+                videos: [],
+                signature: signature || null,
+                verifiedBy: verifiedBy,
+                verifiedAt: now
+            };
+
+            // Calculate final earnings (after penalty if any)
+            const baseEarnings = order.pricing.totalAmount * 0.7; // 70% to driver
+            const penalty = order.metadata?.penalty?.amount || 0;
+            const finalEarnings = baseEarnings - penalty;
+
+            // Add tracking history
+            order.orderTrackingHistory.push({
+                status: 'delivery_completed',
+                timestamp: now,
+                title: 'Delivery Completed',
+                description: 'Package successfully delivered',
+                icon: '✅',
+                metadata: {
+                    proof: {
+                        type: 'secret_verified',
+                        verifiedAt: now
+                    }
+                },
+                updatedBy: {
+                    role: 'driver',
+                    name: userData.fullName
+                },
+                isCompleted: true,
+                isCurrent: true
+            });
+
+            await order.save();
+
+            // Update driver stats and wallet
+            await Driver.findByIdAndUpdate(
+                userData._id,
+                {
+                    $set: {
+                        availabilityStatus: 'online',
+                        'operationalStatus.currentOrderId': null
+                    },
+                    $inc: {
+                        'performance.totalDeliveries': 1,
+                        'performance.weeklyStats.deliveries': 1,
+                        'performance.monthlyStats.deliveries': 1,
+                        'performance.weeklyStats.earnings': finalEarnings,
+                        'performance.monthlyStats.earnings': finalEarnings,
+                        'wallet.balance': finalEarnings,
+                        'wallet.totalEarnings': finalEarnings,
+                        'wallet.pendingEarnings': -finalEarnings
+                    }
+                }
+            );
+
+            // TODO: Send completion notification to client
+            // TODO: Request rating from both parties
+
+            return res.status(200).json({
+                success: true,
+                message: "Delivery completed successfully",
+                earnings: {
+                    base: baseEarnings,
+                    penalty: penalty,
+                    final: finalEarnings,
+                    breakdown: penalty > 0 ? {
+                        baseEarnings: `₦${baseEarnings.toFixed(2)}`,
+                        penalty: `-₦${penalty.toFixed(2)}`,
+                        finalEarnings: `₦${finalEarnings.toFixed(2)}`
+                    } : null
+                }
+            });
+
+        } catch (error) {
+            console.error('Confirm delivery error:', error);
+            return res.status(500).json({
+                error: "An error occurred while confirming delivery"
+            });
+        }
+    }
+
+    /**
+     * POST /driver/cancel-order
+     * Driver cancels order with penalty calculation
+     */
+    static async cancelOrder(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { orderId, reason } = req.body;
+
+        if (!orderId || !reason) {
+            return res.status(400).json({
+                error: "Order ID and reason are required"
+            });
+        }
+
+        try {
+            const { Order } = await getOrderModels();
+            const { Driver } = await getModels();
+
+            const order = await Order.findById(orderId);
+
+            if (!order) {
+                return res.status(404).json({ error: "Order not found" });
+            }
+
+            // Calculate cancellation penalty
+            let penalty = 0;
+            if (order.status === 'picked_up' || order.status === 'in_transit') {
+                // Severe penalty for cancelling after pickup
+                penalty = order.pricing.totalAmount * 0.5; // 50% of order value
+            } else if (order.status === 'assigned' || order.status === 'en_route_pickup') {
+                // Moderate penalty for cancelling after acceptance
+                penalty = 500; // Fixed 500 NGN
+            }
+
+            const now = new Date();
+
+            // Update order
+            order.status = 'cancelled';
+            order.cancellation = {
+                reason,
+                cancelledBy: userData._id,
+                cancelledAt: now,
+                cancellationFee: penalty
+            };
+
+            // Add tracking history
+            order.orderTrackingHistory.push({
+                status: 'cancelled',
+                timestamp: now,
+                title: 'Order Cancelled',
+                description: `Cancelled by driver: ${reason}`,
+                icon: '❌',
+                updatedBy: {
+                    role: 'driver',
+                    name: userData.fullName
+                },
+                isCompleted: true,
+                isCurrent: true
+            });
+
+            await order.save();
+
+            // Update driver
+            await Driver.findByIdAndUpdate(
+                userData._id,
+                {
+                    $set: {
+                        availabilityStatus: 'online',
+                        'operationalStatus.currentOrderId': null
+                    },
+                    $inc: {
+                        'performance.cancellationRate': 1,
+                        'wallet.balance': -penalty // Deduct penalty
+                    }
+                }
+            );
+
+            // TODO: Notify client
+            // TODO: Re-broadcast order to other drivers
+
+            return res.status(200).json({
+                success: true,
+                message: "Order cancelled",
+                penalty: penalty > 0 ? {
+                    amount: penalty,
+                    reason: order.status === 'picked_up'
+                        ? "50% penalty for cancelling after pickup"
+                        : "500 NGN penalty for cancelling after acceptance"
+                } : null
+            });
+
+        } catch (error) {
+            console.error('Cancel order error:', error);
+            return res.status(500).json({
+                error: "An error occurred while cancelling order"
+            });
+        }
+    }
+
+    /**
+     * GET /driver/order/:orderId
+     * Get active order details
+     */
+    static async getOrderDetails(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { orderId } = req.params;
+
+        try {
+            const { Order } = await getOrderModels();
+
+            const order = await Order.findById(orderId).lean();
+
+            if (!order) {
+                return res.status(404).json({ error: "Order not found" });
+            }
+
+            // Verify driver is assigned to this order
+            if (order.driverAssignment?.driverId?.toString() !== userData._id.toString()) {
+                return res.status(403).json({
+                    error: "You are not assigned to this order"
+                });
+            }
+
+            return res.status(200).json({
+                success: true,
+                order
+            });
+
+        } catch (error) {
+            console.error('Get order details error:', error);
+            return res.status(500).json({
+                error: "An error occurred while fetching order details"
+            });
+        }
+    }
+
+    /**
+     * POST /driver/report-issue
+     * Report an issue with the order
+     */
+    static async reportIssue(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { orderId, issueType, description, photos } = req.body;
+
+        if (!orderId || !issueType || !description) {
+            return res.status(400).json({
+                error: "Order ID, issue type, and description are required"
+            });
+        }
+
+        try {
+            const { Order } = await getOrderModels();
+
+            const order = await Order.findById(orderId);
+
+            if (!order) {
+                return res.status(404).json({ error: "Order not found" });
+            }
+
+            // Log issue in communications
+            order.communications.push({
+                type: 'issue_report',
+                recipient: 'admin',
+                content: `Issue reported by driver ${userData.fullName}: ${issueType} - ${description}`,
+                sentAt: new Date(),
+                status: 'sent',
+                metadata: {
+                    issueType,
+                    photos: photos || []
+                }
+            });
+
+            await order.save();
+
+            // TODO: Alert admin dashboard
+            // TODO: Send notification to support team
+
+            return res.status(200).json({
+                success: true,
+                message: "Issue reported successfully. Support team will contact you soon."
+            });
+
+        } catch (error) {
+            console.error('Report issue error:', error);
+            return res.status(500).json({
+                error: "An error occurred while reporting issue"
+            });
+        }
+    }
+
+
+
 }
 
 module.exports = DriverController;

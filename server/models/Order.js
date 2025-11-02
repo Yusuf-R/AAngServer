@@ -45,6 +45,9 @@ const LocationSchema = new Schema({
         alternatePhone: String
     },
     extraInformation: String,
+    state: { type: String, index: true },
+    lga: { type: String, index: true },
+    country: { type: String, default: "Nigeria" },
     locationType: {
         type: String,
         enum: ['residential', 'commercial', 'office', 'mall', 'hospital', 'school', 'other'],
