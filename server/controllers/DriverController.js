@@ -1982,10 +1982,6 @@ class DriverController {
                 error: "Driver location (lat, lng) is required"
             });
         }
-        console.log({
-            pt: req.query
-        })
-
         const driverLat = parseFloat(lat);
         const driverLng = parseFloat(lng);
 
@@ -2093,9 +2089,6 @@ class DriverController {
                 ])
                 .lean();
 
-            console.log({orders});
-
-
             // CALCULATE DISTANCES AND ENHANCE ORDER DATA
             const ordersWithDistance = orders.map(order => {
                 const pickupLng = order.location.pickUp.coordinates.coordinates[0];
@@ -2128,13 +2121,6 @@ class DriverController {
                     }
                 }
 
-                console.log({
-                    distance,
-                    estimatedETA
-
-                })
-
-
                 return {
                     ...order,
                     distance: parseFloat(distance.toFixed(2)),
@@ -2161,7 +2147,6 @@ class DriverController {
                     return a.distance - b.distance;
                 });
 
-            console.log({ordersWithDistance});
 
             return res.status(200).json({
                 success: true,

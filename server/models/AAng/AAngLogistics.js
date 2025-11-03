@@ -147,7 +147,7 @@ const DriverSchema = new Schema({
     // Operational Status
     availabilityStatus: {
         type: String,
-        enum: ["online", "offline", "on-ride", "break", "maintenance"],
+        enum: ["online", "offline", "on-delivery", "break", "maintenance"],
         default: "offline",
     },
     operationalStatus: {
