@@ -1,5 +1,5 @@
 // /services/OrderService.js
-import getOrderModels, { generateOrderRef } from '../models/Order';
+import getOrderModels, {generateOrderRef} from '../models/Order';
 import getModels from '../models/AAng/AAngLogistics.js';
 
 class OrderService {
@@ -345,9 +345,7 @@ class OrderService {
                     break;
             }
 
-            const order = await this.Order.findByIdAndUpdate(orderId, updateData, { new: true });
-
-            return order;
+            return await this.Order.findByIdAndUpdate(orderId, updateData, {new: true});
 
         } catch (error) {
             console.error('Error updating order status:', error);

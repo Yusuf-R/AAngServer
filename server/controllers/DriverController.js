@@ -28,7 +28,7 @@ class DriverController {
             return res.status(400).json({error: "Missing required fields"});
         }
 
-        const dbStatus = ["online", "offline", "on-ride", "break", "maintenance"];
+        const dbStatus = ["online", "offline", "on-delivery", "break", "maintenance"];
 
         if (!dbStatus.includes(status)) {
             return res.status(400).json({error: "Unknown status instruction"});
@@ -45,8 +45,8 @@ class DriverController {
                 'operationalStatus.lastActiveAt': new Date()
             };
 
-            // If going offline, clear current order if not on-ride
-            if (status === 'offline' && userData.availabilityStatus !== 'on-ride') {
+            // If going offline, clear current order if not on-delivery
+            if (status === 'offline' && userData.availabilityStatus !== 'on-delivery') {
                 updateData['operationalStatus.currentOrderId'] = null;
             }
 
@@ -1998,12 +1998,6 @@ class DriverController {
             const operationalLGA = userData.verification?.basicVerification?.operationalArea?.lga;
             const operationalState = userData.verification?.basicVerification?.operationalArea?.state;
 
-            console.log({
-                operationalLGA,
-                operationalState,
-                driverLocation: { driverLat, driverLng }
-            });
-
             if (!operationalLGA || !operationalState) {
                 return res.status(400).json({
                     error: "Driver operational area (LGA and State) not properly configured"
@@ -2060,8 +2054,6 @@ class DriverController {
             } else if (priorityFilter === 'high_priority') {
                 query.priority = { $in: ['high', 'urgent'] };
             }
-
-            console.log({query});
 
             // FETCH ORDERS
             const orders = await Order.find(query)
@@ -2250,11 +2242,13 @@ class DriverController {
                 },
                 distanceToPickup,
                 estimatedETA,
-                maxAllowedETA: Math.ceil(estimatedETA * 1.5) // 50% buffer for traffic/delays
+                maxAllowedETA: Math.ceil(estimatedETA * 1.5)
             };
 
-            // Update order with driver assignment
+            // Update order status
             order.status = 'assigned';
+
+            // Update driver assignment
             order.driverAssignment = {
                 driverId: userData._id,
                 driverInfo: {
@@ -2277,8 +2271,8 @@ class DriverController {
                     speed: 0
                 }],
                 estimatedArrival: {
-                    pickup: new Date(Date.now() + estimatedETA * 60000), // Convert minutes to ms
-                    dropoff: null // Will be set after pickup
+                    pickup: new Date(Date.now() + estimatedETA * 60000),
+                    dropoff: null
                 },
                 actualTimes: {
                     assignedAt: new Date(),
@@ -2295,11 +2289,21 @@ class DriverController {
                     estimated: estimatedETA,
                     actual: null
                 },
-                status: 'assigned',
-                responseTime: 0 // Can calculate from broadcast time
+                status: 'accepted',
+                responseTime: 0
             };
 
-            // Add tracking history entry
+            // ⚠️ UPDATE TRACKING HISTORY (New section)
+            // Complete driver_assignment_started
+            const assignmentStartedIndex = order.orderTrackingHistory.findIndex(
+                entry => entry.status === 'driver_assignment_started'
+            );
+            if (assignmentStartedIndex !== -1) {
+                order.orderTrackingHistory[assignmentStartedIndex].isCompleted = true;
+                order.orderTrackingHistory[assignmentStartedIndex].isCurrent = false;
+            }
+
+            // Add driver_assigned
             order.orderTrackingHistory.push({
                 status: 'driver_assigned',
                 timestamp: new Date(),
@@ -2323,21 +2327,47 @@ class DriverController {
                     name: userData.fullName
                 },
                 isCompleted: true,
+                isCurrent: false
+            });
+
+            // Add en_route_to_pickup (CURRENT STEP)
+            order.orderTrackingHistory.push({
+                status: 'en_route_to_pickup',
+                timestamp: new Date(),
+                title: 'Driver En Route to Pickup',
+                description: `${userData.fullName} is heading to pickup location`,
+                icon: '🚀',
+                metadata: {
+                    driverId: userData._id,
+                    driverName: userData.fullName,
+                    vehicleType: userData.vehicleDetails.type,
+                    eta: estimatedETA,
+                    distance: distanceToPickup,
+                    location: {
+                        lat: currentLocation.lat,
+                        lng: currentLocation.lng
+                    }
+                },
+                updatedBy: {
+                    role: 'system',
+                    name: 'AAngLogistics System'
+                },
+                isCompleted: false,
                 isCurrent: true
             });
 
-            // Store acceptance metadata for penalty tracking
+            // Store acceptance metadata
             order.metadata = order.metadata || {};
             order.metadata.acceptanceData = acceptanceData;
 
             await order.save();
 
             // Update driver status
-            await Driver.findByIdAndUpdate(
+            const user = await Driver.findByIdAndUpdate(
                 userData._id,
                 {
                     $set: {
-                        availabilityStatus: 'on-ride',
+                        availabilityStatus: 'on-delivery',
                         'operationalStatus.currentOrderId': order._id,
                         'operationalStatus.lastActiveAt': new Date(),
                         'currentLocation.coordinates': {
@@ -2350,9 +2380,63 @@ class DriverController {
                 }
             );
 
-            // TODO: Send notifications to client
-            // TODO: Create OrderAssignment record
-            // TODO: Notify other drivers that order is taken
+            // get dashboard
+            const dashboard = await DriverController.userDashBoardData(user);
+
+            // ⚠️ SEND NOTIFICATIONS (New section)
+            try {
+
+                // Notify client
+                await NotificationService.createNotification({
+                    userId: order.clientId,
+                    type: 'delivery.driver_assigned',
+                    templateData: {
+                        orderRef: order.orderRef,
+                        orderId: order._id.toString(),
+                        driverName: userData.fullName,
+                        driverPhone: userData.phoneNumber,
+                        estimatedTime: `${estimatedETA} minutes`,
+                        vehicleType: userData.vehicleDetails.type,
+                        vehicleNumber: userData.vehicleDetails.plateNumber
+                    },
+                    metadata: {
+                        orderId: order._id,
+                        orderRef: order.orderRef,
+                        driverId: userData._id,
+                        estimatedETA,
+                        distance: distanceToPickup
+                    },
+                    priority: 'HIGH'
+                });
+
+                // Notify driver
+                await NotificationService.createNotification({
+                    userId: userData._id,
+                    type: 'delivery.driver_assigned',
+                    templateData: {
+                        orderRef: order.orderRef,
+                        orderId: order._id.toString(),
+                        pickupLocation: order.location.pickUp.address,
+                        amount: order.pricing.totalAmount.toLocaleString('en-NG'),
+                        distance: distanceToPickup.toFixed(1)
+                    },
+                    metadata: {
+                        orderId: order._id,
+                        orderRef: order.orderRef,
+                        pickupLocation: order.location.pickUp,
+                        dropoffLocation: order.location.dropOff,
+                        estimatedETA
+                    },
+                    priority: 'URGENT'
+                });
+
+                console.log('✅ Notifications sent successfully');
+            } catch (notificationError) {
+                console.error('⚠️ Notification error (non-blocking):', notificationError);
+            }
+
+            // TODO: Update OrderAssignment record -- maybe for emergency fallback
+
 
             return res.status(200).json({
                 success: true,
@@ -2361,12 +2445,31 @@ class DriverController {
                     _id: order._id,
                     orderRef: order.orderRef,
                     status: order.status,
-                    pickupLocation: order.location.pickUp,
-                    dropoffLocation: order.location.dropOff,
+                    deliveryToken: order.deliveryToken, // Driver needs this
+                    pickupLocation: {
+                        address: order.location.pickUp.address,
+                        coordinates: order.location.pickUp.coordinates,
+                        landmark: order.location.pickUp.landmark,
+                        contactPerson: order.location.pickUp.contactPerson,
+                        extraInformation: order.location.pickUp.extraInformation,
+                        building: order.location.pickUp.building
+                    },
+                    dropoffLocation: {
+                        address: order.location.dropOff.address,
+                        coordinates: order.location.dropOff.coordinates,
+                        landmark: order.location.dropOff.landmark,
+                        contactPerson: order.location.dropOff.contactPerson,
+                        extraInformation: order.location.dropOff.extraInformation,
+                        building: order.location.dropOff.building
+                    },
+                    package: order.package,
+                    pricing: order.pricing,
                     estimatedPickupTime: estimatedETA,
                     maxAllowedTime: acceptanceData.maxAllowedETA,
-                    package: order.package,
-                    pricing: order.pricing
+                    currentStage: 'en_route_to_pickup',
+                    vehicleRequirements: order.vehicleRequirements,
+                    priority: order.priority,
+                    orderType: order.orderType
                 },
                 warning: distanceToPickup > 10
                     ? "You're quite far from pickup location. Ensure timely arrival to avoid penalties."
@@ -2385,7 +2488,7 @@ class DriverController {
      * POST /driver/update-location
      * Update driver location during active delivery
      */
-    static async updateLocation(req, res) {
+    static async updateActiveDeliveryLocation(req, res) {
         const preCheckResult = await AuthController.apiPreCheck(req);
 
         if (!preCheckResult.success) {

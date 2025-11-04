@@ -21,7 +21,8 @@ const NotificationSchema = new mongoose.Schema({
             'SYSTEM',     // System messages and updates
             'PAYMENT',    // Payment and wallet notifications
             'SOCIAL',     // Messages, reviews, community
-            'PROMOTION'   // Marketing and promotional content
+            'PROMOTION',   // Marketing and promotional content
+            'DRIVER',      // Driver notifications
         ],
         required: true,
         index: true,
@@ -36,6 +37,9 @@ const NotificationSchema = new mongoose.Schema({
             'order.confirmed', // when the order is confirmed by the admin
             'order.cancelled',
             'order.modified',
+            'order.admin_approved',
+            'order.admin_rejected',
+
 
             // DELIVERY category
             'delivery.driver_assigned',
@@ -45,6 +49,11 @@ const NotificationSchema = new mongoose.Schema({
             'delivery.failed',
             'delivery.delayed',
             'delivery.location_update',
+
+
+            // DRIVER category (NEW)
+            'driver.order_assigned',      // ⚠️ ADD THIS
+            'driver.order_broadcast',     // ⚠️ ADD THIS (already in your templates)
 
             // SECURITY category
             'security.password_changed',

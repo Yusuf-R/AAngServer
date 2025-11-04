@@ -142,20 +142,37 @@ const OrderTrackingHistorySchema = new Schema({
         type: String,
         required: true,
         enum: [
+            // Order Creation Phase
             'order_created',
             'order_submitted',
-            'payment_confirmed',
+            'payment_initiated',        // When payment starts
+            'payment_confirmed',         // When payment succeeds
+            'payment_completed',
+
+            // Admin Review Phase
             'admin_review_started',
             'admin_review_completed',
+            'admin_approved',
+            'admin_rejected',
+
+            // Driver Assignment Phase
             'driver_assignment_started',
             'driver_assigned',
+
+            // Pickup Phase
             'en_route_to_pickup',
             'arrived_at_pickup',
             'package_picked_up',
+
+            // Transit Phase
             'in_transit',
             'arrived_at_destination',
+
+            // Completion Phase
             'delivery_completed',
             'delivery_failed',
+
+            // Cancellation
             'cancelled',
             'system_admin_rejected'
         ]

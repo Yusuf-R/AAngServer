@@ -365,6 +365,12 @@ class NotificationService extends EventEmitter {
                     body: this.interpolateTemplate(template.body, templateData),
                     orderRef: this.interpolateTemplate(template.orderRef || '', templateData),
                     amountPaid: this.interpolateTemplate(template.amountPaid || '', templateData),
+                    orderId: this.interpolateTemplate(template.orderId || '', templateData),
+                    driverName: this.interpolateTemplate(template.driverName || '', templateData),
+                    driverId: this.interpolateTemplate(template.driverId || '', templateData),
+                    driverPhone: this.interpolateTemplate(template.driverPhone || '', templateData),
+                    driverEmail: this.interpolateTemplate(template.driverEmail || '', templateData),
+                    estimatedTime: this.interpolateTemplate(template.estimatedTime || '', templateData),
                     richContent: {
                         // Process action buttons with deep links
                         actionButtons: template.actionButtons?.map(button => ({
