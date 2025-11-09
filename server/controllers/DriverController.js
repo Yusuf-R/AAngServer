@@ -8,6 +8,17 @@ import MailClient from "../utils/mailer";
 import NotificationService from "../services/NotificationService";
 import Notification from '../models/Notification';
 
+const DELIVERY_STAGES = {
+    DISCOVERING: 'discovering',
+    ACCEPTED: 'accepted',
+    ARRIVED_PICKUP: 'arrived_pickup',
+    PICKED_UP: 'picked_up',
+    ARRIVED_DROPOFF: 'arrived_dropoff',
+    DELIVERED: 'delivered',
+    COMPLETED: 'completed',
+    CANCELLED: 'cancelled'
+};
+
 
 class DriverController {
 
@@ -126,7 +137,7 @@ class DriverController {
                 user: dashboardData
             });
         } catch (err) {
-            console.error('Change password error:', err);
+            console.log('Change password error:', err);
             return res.status(500).json({error: 'Failed to change password'});
         }
 
@@ -437,7 +448,7 @@ class DriverController {
             });
 
         } catch (err) {
-            console.error('Dashboard data error:', err);
+            console.log('Dashboard data error:', err);
             return res.status(500).json({
                 error: 'Failed to fetch dashboard data',
                 details: err.message
@@ -509,8 +520,6 @@ class DriverController {
                 return res.status(404).json({error: "User not found"});
             }
 
-            console.log('Profile updated successfully:', updatedUser);
-
             // get dashboard data
             const dashboardData = await DriverController.userDashBoardData(updatedUser);
             if (!dashboardData) {
@@ -523,7 +532,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error("Profile update error:", error);
+            console.log("Profile update error:", error);
             return res.status(500).json({
                 error: "An error occurred while updating profile"
             });
@@ -588,7 +597,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error("Profile update error:", error);
+            console.log("Profile update error:", error);
             return res.status(500).json({
                 error: "An error occurred while updating avatar"
             });
@@ -740,7 +749,7 @@ class DriverController {
                 user: userDashboard,
             });
         } catch (err) {
-            console.error('Email verification failed:', err.message);
+            console.log('Email verification failed:', err.message);
             return res.status(400).json({error: err.message});
         }
     }
@@ -787,7 +796,7 @@ class DriverController {
                 user: userDashboard,
             });
         } catch (err) {
-            console.error('Password reset failed:', err.message);
+            console.log('Password reset failed:', err.message);
             return res.status(400).json({error: err.message});
         }
     }
@@ -910,7 +919,7 @@ class DriverController {
             });
 
         } catch (err) {
-            console.error('Pin verification failed:', err.message);
+            console.log('Pin verification failed:', err.message);
             return res.status(400).json({error: err.message});
         }
     }
@@ -943,7 +952,7 @@ class DriverController {
                 message: 'Pin verified successfully',
             });
         } catch (err) {
-            console.error('Pin verification failed:', err.message);
+            console.log('Pin verification failed:', err.message);
             return res.status(400).json({error: err.message});
         }
     }
@@ -1005,7 +1014,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error("Location creation error:", error);
+            console.log("Location creation error:", error);
 
             // Handle specific MongoDB errors
             if (error.name === 'ValidationError') {
@@ -1079,7 +1088,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error("Location update error:", error);
+            console.log("Location update error:", error);
 
             // Handle specific MongoDB errors
             if (error.name === 'ValidationError') {
@@ -1168,7 +1177,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error("Location delete error:", error);
+            console.log("Location delete error:", error);
             return res.status(500).json({
                 error: "An error occurred while deleting location"
             });
@@ -1215,7 +1224,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error("Get locations error:", error);
+            console.log("Get locations error:", error);
             return res.status(500).json({
                 error: "An error occurred while fetching locations"
             });
@@ -1273,7 +1282,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error("Get location by ID error:", error);
+            console.log("Get location by ID error:", error);
             return res.status(500).json({
                 error: "An error occurred while fetching location"
             });
@@ -1712,7 +1721,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error("Verification submission error:", error);
+            console.log("Verification submission error:", error);
             return res.status(500).json({
                 error: "An error occurred while submitting verification",
                 message: error.message
@@ -1746,7 +1755,7 @@ class DriverController {
 
             return res.status(200).json({notifications, stats});
         } catch (err) {
-            console.error('Fetch notifications error:', err);
+            console.log('Fetch notifications error:', err);
             return res.status(500).json({error: 'Failed to fetch notifications'});
         }
     }
@@ -1771,7 +1780,7 @@ class DriverController {
 
             return res.status(200).json({stats});
         } catch (err) {
-            console.error('Fetch notification stats error:', err);
+            console.log('Fetch notification stats error:', err);
             return res.status(500).json({error: 'Failed to fetch notification stats'});
         }
     }
@@ -1799,7 +1808,7 @@ class DriverController {
             await notification.markAsRead();
             return res.status(200).json({message: 'Notification marked as read'});
         } catch (err) {
-            console.error('Mark as read error:', err);
+            console.log('Mark as read error:', err);
             return res.status(500).json({error: 'Failed to mark notification as read'});
         }
 
@@ -1825,7 +1834,7 @@ class DriverController {
 
             return res.status(200).json({message: 'All notifications marked as read'});
         } catch (err) {
-            console.error('Mark all as read error:', err);
+            console.log('Mark all as read error:', err);
             return res.status(500).json({error: 'Failed to mark all notifications as read'});
         }
     }
@@ -1848,7 +1857,7 @@ class DriverController {
             const unreadCount = await NotificationService.getUnreadCount(userId);
             return res.status(200).json({unreadCount});
         } catch (err) {
-            console.error('Get unread count error:', err);
+            console.log('Get unread count error:', err);
             return res.status(500).json({error: 'Failed to get unread count'});
         }
     }
@@ -1876,7 +1885,7 @@ class DriverController {
             await notification.softDelete();
             return res.status(200).json({message: 'Notification deleted'});
         } catch (err) {
-            console.error('Delete notification error:', err);
+            console.log('Delete notification error:', err);
             return res.status(500).json({error: 'Failed to delete notification'});
         }
     }
@@ -1901,7 +1910,7 @@ class DriverController {
 
             return res.status(200).json({message: 'All notifications deleted'});
         } catch (err) {
-            console.error('Delete all notifications error:', err);
+            console.log('Delete all notifications error:', err);
             return res.status(500).json({error: 'Failed to delete all notifications'});
         }
     }
@@ -2161,7 +2170,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Get available orders error:', error);
+            console.log('Get available orders error:', error);
             return res.status(500).json({
                 error: "An error occurred while fetching orders"
             });
@@ -2432,7 +2441,7 @@ class DriverController {
 
                 console.log('✅ Notifications sent successfully');
             } catch (notificationError) {
-                console.error('⚠️ Notification error (non-blocking):', notificationError);
+                console.log('⚠️ Notification error (non-blocking):', notificationError);
             }
 
             // TODO: Update OrderAssignment record -- maybe for emergency fallback
@@ -2441,6 +2450,7 @@ class DriverController {
             return res.status(200).json({
                 success: true,
                 message: "Order accepted successfully",
+                dashboard,
                 order: {
                     _id: order._id,
                     orderRef: order.orderRef,
@@ -2477,7 +2487,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Accept order error:', error);
+            console.log('Accept order error:', error);
             return res.status(500).json({
                 error: "An error occurred while accepting order"
             });
@@ -2499,7 +2509,7 @@ class DriverController {
         }
 
         const { userData } = preCheckResult;
-        const { orderId, location } = req.body;
+        const { orderId, location, deliveryStage } = req.body;
 
         if (!orderId || !location?.lat || !location?.lng) {
             return res.status(400).json({
@@ -2519,6 +2529,10 @@ class DriverController {
 
             // Verify this driver is assigned to this order
             if (order.driverAssignment.driverId.toString() !== userData._id.toString()) {
+                console.log({
+                    oid:order.driverAssignment.driverId,
+                    uid: userData._id
+                })
                 return res.status(403).json({
                     error: "You are not assigned to this order"
                 });
@@ -2571,7 +2585,7 @@ class DriverController {
                             name: 'AAngLogistics System'
                         },
                         isCompleted: true,
-                        isCurrent: true
+                        isCurrent: false
                     });
                 }
             }
@@ -2602,7 +2616,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Update location error:', error);
+            console.log('Update location error:', error);
             return res.status(500).json({
                 error: "An error occurred while updating location"
             });
@@ -2662,7 +2676,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Location loss notification error:', error);
+            console.log('Location loss notification error:', error);
             return res.status(500).json({
                 error: "An error occurred while reporting location loss"
             });
@@ -2777,7 +2791,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Confirm pickup error:', error);
+            console.log('Confirm pickup error:', error);
             return res.status(500).json({
                 error: "An error occurred while confirming pickup"
             });
@@ -2910,7 +2924,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Confirm delivery error:', error);
+            console.log('Confirm delivery error:', error);
             return res.status(500).json({
                 error: "An error occurred while confirming delivery"
             });
@@ -3018,7 +3032,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Cancel order error:', error);
+            console.log('Cancel order error:', error);
             return res.status(500).json({
                 error: "An error occurred while cancelling order"
             });
@@ -3064,7 +3078,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Get order details error:', error);
+            console.log('Get order details error:', error);
             return res.status(500).json({
                 error: "An error occurred while fetching order details"
             });
@@ -3127,11 +3141,90 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Report issue error:', error);
+            console.log('Report issue error:', error);
             return res.status(500).json({
                 error: "An error occurred while reporting issue"
             });
         }
+    }
+
+    static async arrivedPickUp(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { orderId, stage, locationDetails } = req.body;
+        if (!orderId || !stage || !locationDetails) {
+            return res.status(400).json({
+                error: "Order ID, stage, and location details are required"
+            });
+        }
+
+        if (stage !== 'arrived_pickup') {
+            return res.status(400).json({
+                error: "Invalid delivery status"
+            });
+        }
+
+        try {
+            const { Order } = await getOrderModels();
+
+            const order = await Order.findById(orderId);
+
+            if (!order) {
+                return res.status(404).json({ error: "Order not found" });
+            }
+
+            order.orderTrackingHistory.push({
+                status: 'arrived_at_pickup',
+                timestamp: new Date(),
+                title: 'Driver Arrived',
+                description: 'Driver has arrived at pickup location',
+                icon: '📍',
+                updatedBy: {
+                    role: 'system',
+                    name: 'AAngLogistics System'
+                },
+                isCompleted: true,
+                isCurrent: true
+            });
+
+            await Driver.findByIdAndUpdate(
+                userData._id,
+                {
+                    $set: {
+                        'currentLocation.coordinates': {
+                            lat: locationDetails.lat,
+                            lng: locationDetails.lng
+                        },
+                        'currentLocation.accuracy': locationDetails.accuracy || 0,
+                        'currentLocation.speed': locationDetails.speed || 0,
+                        'currentLocation.isMoving': (locationDetails.speed || 0) > 1,
+                        'currentLocation.timestamp': new Date(),
+                        'operationalStatus.lastLocationUpdate': new Date()
+                    }
+                }
+            );
+
+
+            return res.status(200).json({
+                success: true,
+                message: "Issue reported successfully. Support team will contact you soon."
+            });
+
+        } catch (error) {
+            console.log('Report issue error:', error);
+            return res.status(500).json({
+                error: "An error occurred while reporting issue"
+            });
+        }
+
     }
 
 

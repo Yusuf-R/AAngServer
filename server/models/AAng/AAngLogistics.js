@@ -156,7 +156,7 @@ const DriverSchema = new Schema({
         batteryLevel: {type: Number, min: 0, max: 100},
         appVersion: String,
         deviceModel: String,
-        connectionQuality: {type: String, enum: ["excellent", "good", "poor", "offline"], default: "offline"},
+        connectionQuality: {type: String, enum: ["excellent", "good", "poor", "offline"], default: "excellent"},
         isActive: {type: Boolean, default: false},
         lastActiveAt: {type: Date, default: Date.now}
     },

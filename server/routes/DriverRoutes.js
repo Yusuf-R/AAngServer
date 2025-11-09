@@ -59,7 +59,8 @@ driverRouter.patch('/notification/mark-all-as-read', driverController.markAllAsR
 // orders
 driverRouter.get('/orders/get/available', driverController.getAvailableOrders);
 driverRouter.patch('/order/accept', driverController.acceptOrder);
-driverRouter.patch('/orders/location/update', driverController.updateActiveDeliveryLocation);
+driverRouter.patch('/order/location/update', driverController.updateActiveDeliveryLocation);
+driverRouter.patch('/order/arrive-pickup', driverController.arrivedPickUp)
 
 
 module.exports = driverRouter;
