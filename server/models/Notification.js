@@ -43,6 +43,7 @@ const NotificationSchema = new mongoose.Schema({
 
             // DELIVERY category
             'delivery.driver_assigned',
+            'delivery.driver_arrived',
             'delivery.picked_up',
             'delivery.in_transit',
             'delivery.delivered',

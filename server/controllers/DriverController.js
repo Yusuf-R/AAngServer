@@ -2684,120 +2684,6 @@ class DriverController {
     }
 
     /**
-     * POST /driver/confirm-pickup
-     * Driver confirms package pickup and validates timing
-     */
-    static async confirmPickup(req, res) {
-        const preCheckResult = await AuthController.apiPreCheck(req);
-
-        if (!preCheckResult.success) {
-            return res.status(preCheckResult.statusCode).json({
-                error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
-            });
-        }
-
-        const { userData } = preCheckResult;
-        const { orderId, location, photos } = req.body;
-
-        if (!orderId || !location) {
-            return res.status(400).json({
-                error: "Order ID and location are required"
-            });
-        }
-
-        try {
-            const { Order } = await getOrderModels();
-
-            const order = await Order.findById(orderId);
-
-            if (!order) {
-                return res.status(404).json({ error: "Order not found" });
-            }
-
-            const now = new Date();
-            const acceptanceData = order.metadata?.acceptanceData;
-
-            // Calculate penalty if driver was dishonest about location
-            let penalty = null;
-            if (acceptanceData) {
-                const actualArrivalTime = (now - acceptanceData.acceptedLocation.timestamp) / 60000; // minutes
-                const expectedMaxTime = acceptanceData.maxAllowedETA;
-
-                if (actualArrivalTime > expectedMaxTime) {
-                    // Driver took longer than expected
-                    const delay = actualArrivalTime - expectedMaxTime;
-                    const delayPercentage = (delay / expectedMaxTime) * 100;
-
-                    if (delayPercentage > 20) {
-                        // Significant delay - likely lied about location
-                        penalty = {
-                            type: 'location_dishonesty',
-                            amount: Math.min(delayPercentage * 10, 500), // Cap at 500 NGN
-                            reason: `Arrived ${Math.ceil(delay)} minutes late. Expected location dishonesty.`,
-                            deducted: false
-                        };
-
-                        // Store penalty for later deduction from earnings
-                        order.metadata.penalty = penalty;
-                    }
-                }
-            }
-
-            // Update order status
-            order.status = 'picked_up';
-            order.driverAssignment.actualTimes.pickedUpAt = now;
-            order.pickupConfirmation = {
-                confirmedBy: {
-                    name: userData.fullName,
-                    phone: userData.phoneNumber
-                },
-                confirmedAt: now,
-                photos: photos || [],
-                signature: null // Can add signature later
-            };
-
-            // Add tracking history
-            order.orderTrackingHistory.push({
-                status: 'package_picked_up',
-                timestamp: now,
-                title: 'Package Picked Up',
-                description: 'Driver has collected the package',
-                icon: '📦',
-                updatedBy: {
-                    role: 'driver',
-                    name: userData.fullName
-                },
-                isCompleted: true,
-                isCurrent: true
-            });
-
-            await order.save();
-
-            return res.status(200).json({
-                success: true,
-                message: "Pickup confirmed",
-                order: {
-                    _id: order._id,
-                    orderRef: order.orderRef,
-                    status: order.status,
-                    dropoffLocation: order.location.dropOff
-                },
-                penalty: penalty ? {
-                    warning: penalty.reason,
-                    amount: penalty.amount,
-                    note: "This will be deducted from your delivery earnings"
-                } : null
-            });
-
-        } catch (error) {
-            console.log('Confirm pickup error:', error);
-            return res.status(500).json({
-                error: "An error occurred while confirming pickup"
-            });
-        }
-    }
-    /**
      * POST /driver/confirm-delivery
      * Driver confirms delivery completion and verifies token
      */
@@ -3174,6 +3060,7 @@ class DriverController {
 
         try {
             const { Order } = await getOrderModels();
+            const {Driver} = await getModels();
 
             const order = await Order.findById(orderId);
 
@@ -3211,11 +3098,38 @@ class DriverController {
                     }
                 }
             );
+            // ⚠️ SEND NOTIFICATIONS (New section)
+            try {
+
+                // Notify client
+                await NotificationService.createNotification({
+                    userId: order.clientId,
+                    type: 'delivery.driver_arrived',
+                    templateData: {
+                        orderRef: order.orderRef,
+                        orderId: order._id.toString(),
+                        driverName: userData.fullName,
+                        driverPhone: userData.phoneNumber,
+                        vehicleType: userData.vehicleDetails.type,
+                        vehicleNumber: userData.vehicleDetails.plateNumber
+                    },
+                    metadata: {
+                        orderId: order._id,
+                        orderRef: order.orderRef,
+                        driverId: userData._id,
+                    },
+                    priority: 'HIGH'
+                });
+
+                console.log('✅ Notifications sent successfully');
+            } catch (notificationError) {
+                console.log('⚠️ Notification error (non-blocking):', notificationError);
+            }
 
 
             return res.status(200).json({
                 success: true,
-                message: "Issue reported successfully. Support team will contact you soon."
+                message: "Driver has arrived at pickup location."
             });
 
         } catch (error) {
@@ -3226,6 +3140,390 @@ class DriverController {
         }
 
     }
+
+    /**
+     * Confirm Package Pickup - V2
+     * Merges v1 functionality with new media structure
+     *
+     * POST /api/driver/order/confirm-pickup
+     *
+     * Body: {
+     *   orderId: string,
+     *   stage: 'arrived_pickup',
+     *   verificationData: {
+     *     packageCondition: 'good' | 'damaged' | 'tampered',
+     *     weight: string,
+     *     notes: string,
+     *     contactPersonVerified: boolean,
+     *     photos: [{ key, url, fileName }],
+     *     video: { key, url, fileName, duration } | null,
+     *     videoUrl: string (deprecated - use video.url),
+     *     timestamp: number | null
+     *   }
+     * }
+     */
+    static async confirmPickUp(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { orderId, stage, verificationData, currentLocation } = req.body;
+
+        if (!orderId) {
+            return res.status(400).json({
+                error: "Order ID is required"
+            });
+        }
+
+        if (!verificationData) {
+            return res.status(400).json({
+                error: "Verification data is required"
+            });
+        }
+
+        if (!currentLocation) {
+            return res.status(400).json({
+                error: "Current location data is required"
+            });
+        }
+
+
+
+        // Validate required verification fields
+        const requiredFields = ['packageCondition', 'contactPersonVerified'];
+        for (const field of requiredFields) {
+            if (verificationData[field] === undefined || verificationData[field] === null) {
+                return res.status(400).json({
+                    error: `${field} is required in verification data`
+                });
+            }
+        }
+
+        // Validate minimum images (3 required)
+        if (!verificationData.photos || !Array.isArray(verificationData.photos) || verificationData.photos.length < 2) {
+            return res.status(400).json({
+                error: "At least 2 photos are required for package confirmation"
+            });
+        }
+
+        // Validate package condition
+        const validConditions = ['good', 'damaged', 'tampered'];
+        if (!validConditions.includes(verificationData.packageCondition)) {
+            return res.status(400).json({
+                error: "Invalid package condition. Must be: good, damaged, or tampered"
+            });
+        }
+
+        try {
+            const { Order } = await getOrderModels();
+
+            const order = await Order.findById(orderId);
+
+            if (!order) {
+                return res.status(404).json({ error: "Order not found" });
+            }
+
+            // Verify driver is assigned to this order
+            if (!order.driverAssignment?.driverId ||
+                order.driverAssignment.driverId.toString() !== userData._id.toString()) {
+                return res.status(403).json({
+                    error: "You are not assigned to this order"
+                });
+            }
+
+            // Verify order is in correct stage
+            if (order.status !== 'arrived_pickup') {
+                return res.status(400).json({
+                    error: `Cannot confirm pickup. Forbidden Order status`
+                });
+            }
+
+            // Check if already confirmed
+            if (order.status === 'picked_up-confirmed') {
+                return res.status(400).json({
+                    error: "Package has already been picked up"
+                });
+            }
+
+            const now = new Date();
+
+            // ============================================
+            // 3. CALCULATE PENALTY (Location Honesty Check)
+            // TODO: Implement late delivery penalty logic
+            // ============================================
+
+            // let penalty = null;
+            // const acceptanceData = order.metadata?.acceptanceData;
+            //
+            // if (acceptanceData && acceptanceData.acceptedLocation) {
+            //     const actualArrivalTime = (now - new Date(acceptanceData.acceptedLocation.timestamp)) / 60000; // minutes
+            //     const expectedMaxTime = acceptanceData.maxAllowedETA || 30; // Default 30 min if not set
+            //
+            //     if (actualArrivalTime > expectedMaxTime) {
+            //         const delay = actualArrivalTime - expectedMaxTime;
+            //         const delayPercentage = (delay / expectedMaxTime) * 100;
+            //
+            //         // TODO: Fine-tune penalty thresholds and amounts based on business rules
+            //         if (delayPercentage > 20) {
+            //             penalty = {
+            //                 type: 'location_dishonesty',
+            //                 amount: Math.min(delayPercentage * 10, 500), // Cap at 500 NGN
+            //                 reason: `Arrived ${Math.ceil(delay)} minutes late. Possible location dishonesty.`,
+            //                 deducted: false,
+            //                 calculatedAt: now
+            //             };
+            //
+            //             // Store penalty for later deduction from earnings
+            //             if (!order.metadata) order.metadata = {};
+            //             order.metadata.penalty = penalty;
+            //         }
+            //     }
+            // }
+
+            // ============================================
+            // 4. PROCESS MEDIA REFERENCES
+            // ============================================
+
+            // Extract photo URLs (photos are already uploaded to S3)
+            const photoUrls = verificationData.photos
+                .filter(photo => photo && photo.url)
+                .map(photo => photo.url);
+
+            // Extract video URL if exists
+            let videoUrl = null;
+            if (verificationData.video && verificationData.video.url) {
+                videoUrl = verificationData.video.url;
+            } else if (verificationData.videoUrl) {
+                // Fallback for backward compatibility
+                videoUrl = verificationData.videoUrl;
+            }
+
+            // Store complete media metadata for audit trail
+            const mediaMetadata = {
+                photos: verificationData.photos.map(photo => ({
+                    key: photo.key,
+                    url: photo.url,
+                    fileName: photo.fileName,
+                    uploadedAt: now
+                })),
+                video: verificationData.video ? {
+                    key: verificationData.video.key,
+                    url: verificationData.video.url,
+                    fileName: verificationData.video.fileName,
+                    duration: verificationData.video.duration,
+                    uploadedAt: now
+                } : null
+            };
+
+            // Update main status
+            order.status = 'picked_up-confirmed';
+
+            // Update driver assignment tracking
+            if (!order.driverAssignment.actualTimes) {
+                order.driverAssignment.actualTimes = {};
+            }
+            order.driverAssignment.actualTimes.pickedUpAt = now;
+
+            // Store pickup confirmation with all verification data
+            order.pickupConfirmation = {
+                confirmedBy: {
+                    name: userData.fullName || userData.name,
+                    phone: userData.phoneNumber || userData.phone
+                },
+                confirmedAt: now,
+                photos: photoUrls,
+                videos: videoUrl ? [videoUrl] : [],
+                signature: null, // Can be added in future
+
+                // Extended verification data (new in v2)
+                verification: {
+                    packageCondition: verificationData.packageCondition,
+                    weight: verificationData.weight || null,
+                    notes: verificationData.notes || '',
+                    contactPersonVerified: verificationData.contactPersonVerified,
+                    verifiedAt: now,
+
+                    // Store complete media metadata for audit
+                    mediaMetadata: mediaMetadata
+                }
+            };
+
+            // Mark previous current as completed
+            if (order.orderTrackingHistory && order.orderTrackingHistory.length > 0) {
+                order.orderTrackingHistory.forEach(history => {
+                    if (history.isCurrent) {
+                        history.isCurrent = false;
+                        history.isCompleted = true;
+                    }
+                });
+            }
+
+            // Add new tracking event
+            const trackingEvent = {
+                status: 'package_picked_up',
+                timestamp: now,
+                title: 'Package Picked Up',
+                description: `${userData.fullName || 'Driver'} has collected the package`,
+                icon: '📦',
+                metadata: {
+                    driverId: userData._id,
+                    driverName: userData.fullName || userData.name,
+                    vehicleType: order.driverAssignment?.driverInfo?.vehicleType,
+                    vehicleNumber: order.driverAssignment?.driverInfo?.vehicleNumber,
+
+                    // Package verification summary
+                    packageCondition: verificationData.packageCondition,
+                    photosCount: photoUrls.length,
+                    hasVideo: !!videoUrl,
+
+                    proof: {
+                        type: 'photo',
+                        url: photoUrls[0], // First photo as proof
+                        verifiedAt: now
+                    }
+                },
+                updatedBy: {
+                    role: 'driver',
+                    name: userData.fullName || userData.name
+                },
+                isCompleted: true,
+                isCurrent: true
+            };
+
+            if (!order.orderTrackingHistory) {
+                order.orderTrackingHistory = [];
+            }
+            order.orderTrackingHistory.push(trackingEvent);
+
+            // Calculate distance from driver to pickup
+            const dropOffLng = order.location.dropOff.coordinates.coordinates[0];
+            const dropOffLat = order.location.dropOff.coordinates.coordinates[1];
+
+            const distanceToDropOff = DriverController.calculateDistance(
+                currentLocation.lat,
+                currentLocation.lng,
+                dropOffLng,
+                dropOffLat
+            );
+
+            // Calculate ETA
+            const estimatedETA = DriverController.calculateETA(distanceToDropOff);
+
+            order.orderTrackingHistory.push({
+                status: 'en_route_to_dropoff',
+                timestamp: new Date(),
+                title: 'Driver En Route to Pickup',
+                description: `${userData.fullName} is heading to the drop off location`,
+                icon: '🚀',
+                metadata: {
+                    driverId: userData._id,
+                    driverName: userData.fullName,
+                    vehicleType: userData.vehicleDetails.type,
+                    eta: estimatedETA,
+                    distance: distanceToDropOff,
+                    location: {
+                        lat: currentLocation.lat,
+                        lng: currentLocation.lng
+                    }
+                },
+                updatedBy: {
+                    role: 'system',
+                    name: 'AAngLogistics System'
+                },
+                isCompleted: false,
+                isCurrent: true
+            });
+
+            // ============================================
+            // 7. ADD TO ORDER INSTANT HISTORY (if needed)
+            // ============================================
+
+            if (!order.orderInstantHistory) {
+                order.orderInstantHistory = [];
+            }
+
+            order.orderInstantHistory.push({
+                status: 'package_picked_up',
+                timestamp: now,
+                updatedBy: {
+                    userId: userData._id,
+                    role: 'driver'
+                },
+                notes: verificationData.notes || 'Package picked up and verified'
+            });
+
+            await order.save();
+
+            const response = {
+                success: true,
+                message: "Pickup confirmed successfully",
+            };
+
+            // ============================================
+            // 10. SEND NOTIFICATIONS (Optional - TODO)
+            // ============================================
+
+            // TODO: Send push notification to client
+            // TODO: Send SMS confirmation to client
+            // TODO: Update real-time tracking dashboard
+
+            // ⚠️ SEND NOTIFICATIONS (New section)
+            try {
+
+                // Notify client
+                await NotificationService.createNotification({
+                    userId: order.clientId,
+                    type: 'delivery.picked_up',
+                    templateData: {
+                        orderRef: order.orderRef,
+                        orderId: order._id.toString(),
+                        driverName: userData.fullName,
+                        driverPhone: userData.phoneNumber,
+                        vehicleType: userData.vehicleDetails.type,
+                        vehicleNumber: userData.vehicleDetails.plateNumber
+                    },
+                    metadata: {
+                        orderId: order._id,
+                        orderRef: order.orderRef,
+                        driverId: userData._id,
+                    },
+                    priority: 'HIGH'
+                });
+
+                console.log('✅ Notifications sent successfully');
+            } catch (notificationError) {
+                console.log('⚠️ Notification error (non-blocking):', notificationError);
+            }
+
+            return res.status(200).json(response);
+
+        } catch (error) {
+            console.error('❌ Confirm pickup error:', error);
+
+            // Log detailed error for debugging
+            console.error('Error details:', {
+                orderId,
+                driverId: userData._id,
+                stage,
+                error: error.message,
+                stack: error.stack
+            });
+
+            return res.status(500).json({
+                error: "An error occurred while confirming pickup",
+                ...(process.env.NODE_ENV === 'development' && {
+                    details: error.message
+                })
+            });
+        }
+    }
+
 
 
 

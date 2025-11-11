@@ -54,6 +54,34 @@ class NotificationService extends EventEmitter {
             ]
         });
 
+        this.templates.set('delivery.driver_arrived', {
+            title: '🚚 Driver Arrived!',
+            body: '{driverName} has arrived at your pickup location.',
+            priority: 'HIGH',
+            channels: { push: true, inApp: true, sms: true },
+            actionButtons: [
+                { label: 'Track Live', action: 'track', deepLink: '/tracking/track' },
+                { label: 'Contact Driver', action: 'call', deepLink: 'tel:{driverPhone}' }
+            ]
+        });
+
+
+        // template for picked up
+        this.templates.set('delivery.picked_up', {
+            title: '🚚 Driver Arrived!',
+            body: '{driverName} has picked up your order at your pickup location.',
+            priority: 'HIGH',
+            channels: { push: true, inApp: true, sms: true },
+            actionButtons: [
+                { label: 'Track Live', action: 'track', deepLink: '/tracking/track' },
+                { label: 'Contact Driver', action: 'call', deepLink: 'tel:{driverPhone}' }
+            ]
+        });
+
+
+
+
+
         // Payment
         // Failed Payment Template
         this.templates.set('payment.failed', {

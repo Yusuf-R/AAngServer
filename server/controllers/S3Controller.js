@@ -1,5 +1,7 @@
 import AuthController from "./AuthController";
 import amazonS3Client from "../aws/s3Client";
+import getOrderModels, {generateOrderRef} from "../models/Order";
+import getModels from "../models/AAng/AAngLogistics";
 
 class S3Controller {
     static async GeneratePresignedUrl(req, res) {
@@ -118,6 +120,106 @@ class S3Controller {
         } catch (error) {
             console.error("S3 delete error:", error);
             return res.status(500).json({error: "Failed to delete file."});
+        }
+    }
+
+    /**
+     * Generate presigned URL for driver pickup/delivery confirmation
+     * POST /api/driver/media/confirmation-presigned-url
+     *
+     * Body: {
+     *   orderId: string,
+     *   clientId: string,
+     *   fileType: string,
+     *   fileName: string,
+     *   fileCategory: 'images' | 'videos',
+     *   stage: 'pickup' | 'delivery' (optional)
+     * }
+     */
+    static async GenerateDriverConfirmationPresignedUrl(req, res) {
+        const preCheck = await AuthController.apiPreCheck(req);
+        if (!preCheck.success) {
+            return res.status(preCheck.statusCode).json(preCheck);
+        }
+
+        const { userData } = preCheck; // This is the driver
+        const { orderId, clientId, fileType, fileName, fileCategory, stage } = req.body;
+
+        // Validate required fields
+        if (!orderId || !clientId || !fileType || !fileName || !fileCategory) {
+            return res.status(400).json({
+                error: "Missing required fields: orderId, clientId, fileType, fileName, fileCategory"
+            });
+        }
+
+        // Validate file category
+        if (!['images', 'videos'].includes(fileCategory)) {
+            return res.status(400).json({
+                error: "Invalid fileCategory. Must be 'images' or 'videos'"
+            });
+        }
+
+        try {
+            const {Order} = await getOrderModels();
+            // Optional: Verify driver is assigned to this order
+            const order = await Order.findById(orderId);
+            if (!order || order.driverAssignment.driverId.toString() !== userData._id.toString()) {
+                return res.status(403).json({ error: "You are not assigned to this order" });
+            }
+
+            const { uploadURL, fileURL, key } = await amazonS3Client.generateDriverConfirmationPresignedUrl(
+                fileType,
+                fileCategory,
+                clientId,
+                orderId,
+                userData._id,
+                fileName,
+                stage || 'pickup'
+            );
+
+            return res.status(200).json({
+                success: true,
+                uploadURL,
+                fileURL,
+                key
+            });
+        } catch (error) {
+            console.error('Driver Confirmation Presigned URL Error:', error);
+            return res.status(500).json({
+                error: error.message || 'Failed to generate upload URL.'
+            });
+        }
+    }
+
+    /**
+     * List all media for an order (client + driver confirmation)
+     * GET /api/driver/media/order/:orderId
+     */
+    static async ListOrderMedia(req, res) {
+        const preCheck = await AuthController.apiPreCheck(req);
+        if (!preCheck.success) {
+            return res.status(preCheck.statusCode).json(preCheck);
+        }
+
+        const { orderId } = req.params;
+        const { clientId } = req.query;
+
+        if (!orderId || !clientId) {
+            return res.status(400).json({ error: "Missing orderId or clientId" });
+        }
+
+        try {
+            const media = await amazonS3Client.listOrderConfirmationMedia(clientId, orderId);
+
+            return res.status(200).json({
+                success: true,
+                media
+            });
+        } catch (error) {
+            console.error('List Order Media Error:', error);
+            return res.status(500).json({
+                error: 'Failed to list order media.'
+            });
         }
     }
 

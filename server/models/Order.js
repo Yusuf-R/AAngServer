@@ -285,7 +285,6 @@ const OrderSchema = new Schema({
         required: true,
         index: true
     },
-    // Order Type and Priority
     orderType: {
         type: String,
         enum: ['instant', 'scheduled', 'recurring'],
@@ -296,11 +295,8 @@ const OrderSchema = new Schema({
         enum: ['low', 'normal', 'high', 'urgent'],
         default: 'normal'
     },
-    // Scheduling
     scheduledPickup: Date,
-    // Package Details
     package: {type: PackageSchema, required: true},
-    // Delivery Details
     location: {
         pickUp: {type: LocationSchema, required: true},
         dropOff: {type: LocationSchema, required: true},
@@ -355,11 +351,10 @@ const OrderSchema = new Schema({
             'pending',         // Waiting for driver assignment
             'broadcast',       // Broadcasted to available drivers
             'assigned',        // Driver assigned
-            'confirmed',       // Driver confirmed pickup
+            'picked_up-confirmed',       // Driver confirmed pickup
             'en_route_pickup', // Driver heading to pickup
+            'en_route_dropoff', // Driver heading to pickup
             'arrived_pickup',  // Driver at pickup location
-            'picked_up',       // Package collected
-            'in_transit',      // On the way to delivery
             'arrived_dropoff', // Driver at delivery location
             'delivered',       // Successfully delivered
             'failed',          // Delivery failed
@@ -389,6 +384,7 @@ const OrderSchema = new Schema({
         },
         confirmedAt: Date,
         photos: [String],
+        videos: [String],
         signature: String
     },
     deliveryConfirmation: {

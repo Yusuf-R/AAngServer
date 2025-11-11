@@ -17,6 +17,8 @@ s3Router.options('*', cors(corsOptions));
 // S3 Routes
 s3Router.post('/presigned-url', s3Controller.GeneratePresignedUrl);
 s3Router.post('/driver/presigned-url', s3Controller.GenerateDriverPresignedUrl);
+s3Router.post('/driver/confirmation-presigned-url', s3Controller.GenerateDriverConfirmationPresignedUrl);
+s3Router.get('/driver/order-media', s3Controller.ListOrderMedia);
 s3Router.delete('/delete', s3Controller.DeleteFile);
 
 module.exports = s3Router;
