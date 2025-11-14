@@ -371,6 +371,216 @@ class AmazonS3Client {
             throw error;
         }
     }
+
+    /**
+     * Generate presigned URL for PICKUP confirmation media
+     * Path: Orders/{clientId}/{orderId}/confirmed-order/{driverId}/images|videos/
+     *
+     * @param {string} fileType - MIME type
+     * @param {string} fileCategory - 'images' or 'videos'
+     * @param {string} clientId - Client who created the order
+     * @param {string} orderId - Order being confirmed
+     * @param {string} driverId - Driver confirming pickup
+     * @param {string} fileName - Original filename
+     * @returns {Promise<{uploadURL: string, fileURL: string, key: string}>}
+     */
+    async generateDriverPickUpConfirmationPresignedUrl(fileType, fileCategory, clientId, orderId, driverId, fileName) {
+        // Validate file category
+        if (!['images', 'videos'].includes(fileCategory)) {
+            throw new Error('Invalid file category. Must be "images" or "videos"');
+        }
+
+        // Validate file type
+        const validImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+        const validVideoTypes = ['video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/mpeg'];
+
+        if (fileCategory === 'images' && !validImageTypes.includes(fileType.toLowerCase())) {
+            throw new Error('Invalid image file type');
+        }
+
+        if (fileCategory === 'videos' && !validVideoTypes.includes(fileType.toLowerCase())) {
+            throw new Error('Invalid video file type');
+        }
+
+        // Generate unique filename with pickup prefix
+        const timestamp = Date.now();
+        const uniqueId = uuidv4().substring(0, 8);
+        const ext = fileName.split('.').pop();
+        const sanitizedFilename = `pickup_${timestamp}-${uniqueId}.${ext}`;
+
+        // Build S3 key
+        const key = `Orders/${clientId}/${orderId}/confirmed-order/${driverId}/${fileCategory}/${sanitizedFilename}`;
+
+        const command = new PutObjectCommand({
+            Bucket: this.bucketName,
+            Key: key,
+            ContentType: fileType,
+        });
+
+        try {
+            const uploadURL = await getSignedUrl(this.client, command, {
+                expiresIn: 300, // 5 minutes
+            });
+
+            const fileURL = `https://${this.bucketName}.s3.${process.env.S3_REGION}.amazonaws.com/${key}`;
+
+            return { uploadURL, fileURL, key };
+        } catch (error) {
+            console.error('❌ Driver Pickup Confirmation Presigned URL error:', error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * Generate presigned URL for DROPOFF confirmation media
+     * Path: Orders/{clientId}/{orderId}/confirmed-order/{driverId}/images|videos/
+     *
+     * @param {string} fileType - MIME type
+     * @param {string} fileCategory - 'images' or 'videos'
+     * @param {string} clientId - Client who created the order
+     * @param {string} orderId - Order being confirmed
+     * @param {string} driverId - Driver confirming delivery
+     * @param {string} fileName - Original filename
+     * @returns {Promise<{uploadURL: string, fileURL: string, key: string}>}
+     */
+    async generateDriverDropOffConfirmationPresignedUrl(fileType, fileCategory, clientId, orderId, driverId, fileName) {
+        // Validate file category
+        if (!['images', 'videos'].includes(fileCategory)) {
+            throw new Error('Invalid file category. Must be "images" or "videos"');
+        }
+
+        // Validate file type
+        const validImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+        const validVideoTypes = ['video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/mpeg'];
+
+        if (fileCategory === 'images' && !validImageTypes.includes(fileType.toLowerCase())) {
+            throw new Error('Invalid image file type');
+        }
+
+        if (fileCategory === 'videos' && !validVideoTypes.includes(fileType.toLowerCase())) {
+            throw new Error('Invalid video file type');
+        }
+
+        // Generate unique filename with delivery prefix
+        const timestamp = Date.now();
+        const uniqueId = uuidv4().substring(0, 8);
+        const ext = fileName.split('.').pop();
+        const sanitizedFilename = `delivery_${timestamp}-${uniqueId}.${ext}`;
+
+        // Build S3 key (same folder structure, different prefix)
+        const key = `Orders/${clientId}/${orderId}/confirmed-order/${driverId}/${fileCategory}/${sanitizedFilename}`;
+
+        const command = new PutObjectCommand({
+            Bucket: this.bucketName,
+            Key: key,
+            ContentType: fileType,
+        });
+
+        try {
+            const uploadURL = await getSignedUrl(this.client, command, {
+                expiresIn: 300, // 5 minutes
+            });
+
+            const fileURL = `https://${this.bucketName}.s3.${process.env.S3_REGION}.amazonaws.com/${key}`;
+
+            return { uploadURL, fileURL, key };
+        } catch (error) {
+            console.error('❌ Driver Dropoff Confirmation Presigned URL error:', error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * List all confirmation media for a specific order
+     * Returns organized structure with pickup vs delivery media
+     *
+     * @param {string} clientId
+     * @param {string} orderId
+     * @returns {Promise<{clientMedia, driverMedia: {pickup: {images, videos}, delivery: {images, videos}}}>}
+     */
+    async newListOrderConfirmationMedia(clientId, orderId) {
+        try {
+            const orderPrefix = `Orders/${clientId}/${orderId}/`;
+
+            const command = new ListObjectsV2Command({
+                Bucket: this.bucketName,
+                Prefix: orderPrefix
+            });
+
+            const data = await this.client.send(command);
+            const files = data.Contents || [];
+
+            // Organize files by type
+            const result = {
+                clientMedia: {
+                    images: [],
+                    videos: []
+                },
+                driverMedia: {
+                    pickup: {
+                        images: [],
+                        videos: []
+                    },
+                    delivery: {
+                        images: [],
+                        videos: []
+                    }
+                }
+            };
+
+            files.forEach(file => {
+                const key = file.Key;
+                const url = this.getPublicUrl(key);
+                const fileName = key.split('/').pop();
+
+                const fileObj = {
+                    key,
+                    url,
+                    fileName,
+                    size: file.Size,
+                    lastModified: file.LastModified
+                };
+
+                // Categorize files
+                if (key.includes('/confirmed-order/')) {
+                    // Driver confirmation media
+                    const isPickup = fileName.startsWith('pickup_');
+                    const isDelivery = fileName.startsWith('delivery_');
+
+                    if (key.includes('/images/')) {
+                        if (isPickup) {
+                            result.driverMedia.pickup.images.push(fileObj);
+                        } else if (isDelivery) {
+                            result.driverMedia.delivery.images.push(fileObj);
+                        } else {
+                            // Fallback: use timestamp to determine (earlier = pickup)
+                            result.driverMedia.pickup.images.push(fileObj);
+                        }
+                    } else if (key.includes('/videos/')) {
+                        if (isPickup) {
+                            result.driverMedia.pickup.videos.push(fileObj);
+                        } else if (isDelivery) {
+                            result.driverMedia.delivery.videos.push(fileObj);
+                        } else {
+                            result.driverMedia.pickup.videos.push(fileObj);
+                        }
+                    }
+                } else {
+                    // Client original media
+                    if (key.includes('/images/')) {
+                        result.clientMedia.images.push(fileObj);
+                    } else if (key.includes('/videos/')) {
+                        result.clientMedia.videos.push(fileObj);
+                    }
+                }
+            });
+
+            return result;
+        } catch (error) {
+            console.error('❌ List order media error:', error.message);
+            throw error;
+        }
+    }
 }
 
 const amazonS3Client = new AmazonS3Client();

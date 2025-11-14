@@ -1925,10 +1925,10 @@ class DriverController {
         const dLat = (lat2 - lat1) * Math.PI / 180;
         const dLon = (lon2 - lon1) * Math.PI / 180;
         const a =
-            Math.sin(dLat/2) * Math.sin(dLat/2) +
+            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
             Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-            Math.sin(dLon/2) * Math.sin(dLon/2);
-        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         return R * c;
     }
 
@@ -1968,11 +1968,11 @@ class DriverController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
+        const {userData} = preCheckResult;
 
         // Extract query parameters
         const {
@@ -2001,7 +2001,7 @@ class DriverController {
         }
 
         try {
-            const { Order } = await getOrderModels();
+            const {Order} = await getOrderModels();
 
             // Get driver's operational areas
             const operationalLGA = userData.verification?.basicVerification?.operationalArea?.lga;
@@ -2053,7 +2053,7 @@ class DriverController {
                     : vehicleFilter.split(',').map(v => v.trim());
 
                 if (vehicles.length > 0) {
-                    query.vehicleRequirements = { $in: vehicles };
+                    query.vehicleRequirements = {$in: vehicles};
                 }
             }
 
@@ -2061,7 +2061,7 @@ class DriverController {
             if (priorityFilter === 'urgent') {
                 query.priority = 'urgent';
             } else if (priorityFilter === 'high_priority') {
-                query.priority = { $in: ['high', 'urgent'] };
+                query.priority = {$in: ['high', 'urgent']};
             }
 
             // FETCH ORDERS
@@ -2154,7 +2154,7 @@ class DriverController {
                 orders: ordersWithDistance,
                 count: ordersWithDistance.length,
                 metadata: {
-                    driverLocation: { lat: driverLat, lng: driverLng },
+                    driverLocation: {lat: driverLat, lng: driverLng},
                     operationalArea: {
                         lga: operationalLGA,
                         state: operationalState
@@ -2187,12 +2187,12 @@ class DriverController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { orderId, currentLocation } = req.body;
+        const {userData} = preCheckResult;
+        const {orderId, currentLocation} = req.body;
 
         // Validate input
         if (!orderId || !currentLocation?.lat || !currentLocation?.lng) {
@@ -2202,14 +2202,14 @@ class DriverController {
         }
 
         try {
-            const { Order } = await getOrderModels();
-            const { Driver } = await getModels();
+            const {Order} = await getOrderModels();
+            const {Driver} = await getModels();
 
             // Fetch order
             const order = await Order.findById(orderId);
 
             if (!order) {
-                return res.status(404).json({ error: "Order not found" });
+                return res.status(404).json({error: "Order not found"});
             }
 
             // Check if order is still available
@@ -2262,6 +2262,7 @@ class DriverController {
                 driverId: userData._id,
                 driverInfo: {
                     name: userData.fullName,
+                    email: userData.email,
                     phone: userData.phoneNumber,
                     vehicleType: userData.vehicleDetails.type,
                     vehicleNumber: userData.vehicleDetails.plateNumber,
@@ -2504,12 +2505,12 @@ class DriverController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { orderId, location, deliveryStage } = req.body;
+        const {userData} = preCheckResult;
+        const {orderId, location, deliveryStage} = req.body;
 
         if (!orderId || !location?.lat || !location?.lng) {
             return res.status(400).json({
@@ -2518,21 +2519,17 @@ class DriverController {
         }
 
         try {
-            const { Order } = await getOrderModels();
-            const { Driver } = await getModels();
+            const {Order} = await getOrderModels();
+            const {Driver} = await getModels();
 
             const order = await Order.findById(orderId);
 
             if (!order) {
-                return res.status(404).json({ error: "Order not found" });
+                return res.status(404).json({error: "Order not found"});
             }
 
             // Verify this driver is assigned to this order
             if (order.driverAssignment.driverId.toString() !== userData._id.toString()) {
-                console.log({
-                    oid:order.driverAssignment.driverId,
-                    uid: userData._id
-                })
                 return res.status(403).json({
                     error: "You are not assigned to this order"
                 });
@@ -2633,24 +2630,24 @@ class DriverController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { orderId, lastKnownLocation, failureCount } = req.body;
+        const {userData} = preCheckResult;
+        const {orderId, lastKnownLocation, failureCount} = req.body;
 
         if (!orderId) {
-            return res.status(400).json({ error: "Order ID is required" });
+            return res.status(400).json({error: "Order ID is required"});
         }
 
         try {
-            const { Order } = await getOrderModels();
+            const {Order} = await getOrderModels();
 
             const order = await Order.findById(orderId);
 
             if (!order) {
-                return res.status(404).json({ error: "Order not found" });
+                return res.status(404).json({error: "Order not found"});
             }
 
             // Log location loss incident
@@ -2684,93 +2681,258 @@ class DriverController {
     }
 
     /**
-     * POST /driver/confirm-delivery
-     * Driver confirms delivery completion and verifies token
+     * Complete Delivery - Final Production Version
+     * Handles delivery completion with media, notifications, and rating flow
+     *
+     * POST /api/driver/order/complete-delivery
      */
-    static async confirmDelivery(req, res) {
+    static async completeDelivery(req, res) {
         const preCheckResult = await AuthController.apiPreCheck(req);
 
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { orderId, deliveryToken, photos, signature, verifiedBy } = req.body;
+        const {userData} = preCheckResult;
+        const {orderId, stage, verificationData, locationDetails} = req.body;
 
-        if (!orderId || !deliveryToken) {
+        // ============================================
+        // 1. VALIDATION
+        // ============================================
+
+        if (!orderId || !verificationData) {
             return res.status(400).json({
-                error: "Order ID and delivery token are required"
+                error: "Order ID and verification data are required"
+            });
+        }
+
+        // Validate token
+        if (!verificationData.tokenVerified || !verificationData.deliveryToken) {
+            return res.status(400).json({
+                error: "Delivery token must be verified"
+            });
+        }
+
+        // Validate recipient
+        if (!verificationData.recipientName?.trim()) {
+            return res.status(400).json({
+                error: "Recipient name is required"
+            });
+        }
+
+        // Validate photos (minimum 2)
+        if (!verificationData.photos || verificationData.photos.length < 2) {
+            return res.status(400).json({
+                error: "At least 2 delivery photos are required"
             });
         }
 
         try {
-            const { Order } = await getOrderModels();
-            const { Driver } = await getModels();
+            const {Order} = await getOrderModels();
+            const {Driver, Client} = await getModels();
+            const driver = await Driver.findById(userData._id);
+
+
+            // ============================================
+            // 2. FETCH & VERIFY ORDER
+            // ============================================
 
             const order = await Order.findById(orderId);
 
             if (!order) {
-                return res.status(404).json({ error: "Order not found" });
+                return res.status(404).json({error: "Order not found"});
             }
 
-            // Verify delivery token
-            if (order.deliveryToken !== deliveryToken) {
-                return res.status(400).json({
-                    error: "Invalid delivery token",
-                    attemptsLeft: 2 // Implement attempt tracking
+            // Verify driver assignment
+            if (!order.driverAssignment?.driverId ||
+                order.driverAssignment.driverId.toString() !== userData._id.toString()) {
+                return res.status(403).json({
+                    error: "You are not assigned to this order"
                 });
             }
 
+            // Verify order status
+            if (order.status !== 'arrived_dropoff') {
+                return res.status(400).json({
+                    error: `Cannot complete delivery. Order is '${order.status}', expected 'arrived_dropoff'`
+                });
+            }
+
+            // Verify token matches
+            if (order.deliveryToken !== verificationData.deliveryToken) {
+                return res.status(400).json({
+                    error: "Invalid delivery token"
+                });
+            }
+            const client = await Client.findById(order.clientId);
+
             const now = new Date();
 
-            // Update order status
+            // ============================================
+            // 3. PROCESS MEDIA
+            // ============================================
+
+            const photoUrls = verificationData.photos
+                .filter(photo => photo?.url)
+                .map(photo => photo.url);
+
+            let videoUrl = verificationData.video?.url || verificationData.videoUrl || null;
+
+            const mediaMetadata = {
+                photos: verificationData.photos.map(photo => ({
+                    key: photo.key,
+                    url: photo.url,
+                    fileName: photo.fileName,
+                    uploadedAt: now
+                })),
+                video: verificationData.video ? {
+                    key: verificationData.video.key,
+                    url: verificationData.video.url,
+                    fileName: verificationData.video.fileName,
+                    duration: verificationData.video.duration,
+                    uploadedAt: now
+                } : null
+            };
+
+            // ============================================
+            // 4. CALCULATE EARNINGS
+            // ============================================
+
+            const baseEarnings = order.pricing.totalAmount * 0.7; // 70% to driver
+            const penalty = order.metadata?.penalty?.amount || 0;
+            const finalEarnings = Math.max(0, baseEarnings - penalty);
+
+            // ============================================
+            // 5. UPDATE ORDER
+            // ============================================
+
             order.status = 'delivered';
+
+            // Update driver assignment times
+            if (!order.driverAssignment.actualTimes) {
+                order.driverAssignment.actualTimes = {};
+            }
             order.driverAssignment.actualTimes.deliveredAt = now;
+
+            // Calculate delivery duration
+            if (order.driverAssignment.actualTimes.assignedAt) {
+                const startTime = new Date(order.driverAssignment.actualTimes.assignedAt);
+                const totalMinutes = Math.round((now - startTime) / 60000);
+
+                if (!order.driverAssignment.duration) {
+                    order.driverAssignment.duration = {};
+                }
+                order.driverAssignment.duration.actual = totalMinutes;
+            }
+
+            // Store delivery confirmation
+            order.deliveryConfirmation = {
+                photos: photoUrls,
+                videos: videoUrl ? [videoUrl] : [],
+                signature: verificationData?.recipientSignature || null,
+                verifiedBy: {
+                    name: verificationData.recipientName.trim(),
+                    phone: order.location.dropOff.contactPerson?.phone || ''
+                },
+                verifiedAt: now,
+                verification: {
+                    deliveryToken: verificationData.deliveryToken,
+                    tokenVerifiedAt: now,
+                    recipientName: verificationData.recipientName.trim(),
+                    notes: verificationData.notes || '',
+                    locationDetails: locationDetails || null,
+                    mediaMetadata: mediaMetadata
+                }
+            };
+
+            // Mark token as verified
             order.tokenVerified = {
                 verified: true,
                 verifiedAt: now,
-                verifiedBy: verifiedBy
-            };
-            order.deliveryConfirmation = {
-                photos: photos || [],
-                videos: [],
-                signature: signature || null,
-                verifiedBy: verifiedBy,
-                verifiedAt: now
+                verifiedBy: {
+                    name: verificationData.recipientName.trim()
+                }
             };
 
-            // Calculate final earnings (after penalty if any)
-            const baseEarnings = order.pricing.totalAmount * 0.7; // 70% to driver
-            const penalty = order.metadata?.penalty?.amount || 0;
-            const finalEarnings = baseEarnings - penalty;
+            // ============================================
+            // 6. UPDATE TRACKING HISTORY
+            // ============================================
 
-            // Add tracking history
+            // Mark previous as completed
+            if (order.orderTrackingHistory?.length > 0) {
+                order.orderTrackingHistory.forEach(history => {
+                    if (history.isCurrent) {
+                        history.isCurrent = false;
+                        history.isCompleted = true;
+                    }
+                });
+            }
+
+            // Add delivery completed event
+            if (!order.orderTrackingHistory) {
+                order.orderTrackingHistory = [];
+            }
+
             order.orderTrackingHistory.push({
-                status: 'delivery_completed',
+                status: 'package_delivered',
                 timestamp: now,
-                title: 'Delivery Completed',
-                description: 'Package successfully delivered',
-                icon: '✅',
+                title: 'Package Delivered',
+                description: `Package successfully delivered to ${verificationData.recipientName.trim()}`,
+                icon: '🎉',
                 metadata: {
+                    driverId: userData._id,
+                    driverName: userData.fullName || userData.name,
+                    vehicleType: order.driverAssignment?.driverInfo?.vehicleType,
+                    vehicleNumber: order.driverAssignment?.driverInfo?.vehicleNumber,
+                    recipientName: verificationData.recipientName.trim(),
+                    photosCount: photoUrls.length,
+                    hasVideo: !!videoUrl,
+                    totalDurationMinutes: order.driverAssignment.duration?.actual,
                     proof: {
-                        type: 'secret_verified',
+                        type: 'photo',
+                        url: photoUrls[0],
                         verifiedAt: now
                     }
                 },
                 updatedBy: {
                     role: 'driver',
-                    name: userData.fullName
+                    name: userData.fullName || userData.name
                 },
                 isCompleted: true,
                 isCurrent: true
             });
 
+            // ============================================
+            // 7. UPDATE INSTANT HISTORY
+            // ============================================
+
+            if (!order.orderInstantHistory) {
+                order.orderInstantHistory = [];
+            }
+
+            order.orderInstantHistory.push({
+                status: 'delivery_completed',
+                timestamp: now,
+                updatedBy: {
+                    userId: userData._id,
+                    role: 'driver'
+                },
+                notes: verificationData.notes || 'Delivery completed successfully'
+            });
+
+            // ============================================
+            // 8. SAVE ORDER
+            // ============================================
+
             await order.save();
 
-            // Update driver stats and wallet
+            // ============================================
+            // 9. UPDATE DRIVER STATS & WALLET
+            // ============================================
+
             await Driver.findByIdAndUpdate(
                 userData._id,
                 {
@@ -2785,34 +2947,229 @@ class DriverController {
                         'performance.weeklyStats.earnings': finalEarnings,
                         'performance.monthlyStats.earnings': finalEarnings,
                         'wallet.balance': finalEarnings,
-                        'wallet.totalEarnings': finalEarnings,
-                        'wallet.pendingEarnings': -finalEarnings
+                        'wallet.totalEarnings': finalEarnings
+                    },
+                    $push: {
+                        'wallet.recentTransactions': {
+                            $each: [{
+                                type: 'earning',
+                                amount: finalEarnings,
+                                description: `Delivery completed: ${order.orderRef}`,
+                                orderId: order._id,
+                                timestamp: now,
+                                reference: order.orderRef
+                            }],
+                            $position: 0,
+                            $slice: 50 // Keep last 50 transactions
+                        }
                     }
                 }
             );
 
-            // TODO: Send completion notification to client
-            // TODO: Request rating from both parties
+            // Send Notifications
+            try {
+                // Notify CLIENT - Delivery completed
+                await NotificationService.createNotification({
+                    userId: order.clientId,
+                    type: 'delivery.completed_detailed',
+                    templateData: {
+                        orderRef: order.orderRef,
+                        orderId: order._id.toString(),
+                        driverName: userData.fullName || userData.name,
+                        driverPhotoUrl: userData.avatar || '',
+                        recipientName: verificationData.recipientName.trim(),
+                        deliveryTime: new Date(now).toLocaleTimeString('en-US', {
+                            hour: '2-digit',
+                            minute: '2-digit'
+                        }),
+                        deliveredAt: now.toISOString(),
+                        deliveryPhotoUrl: photoUrls[0] || '',
+                        deliveryPhotosArray: JSON.stringify(photoUrls),
+                        hasVideo: videoUrl ? 'true' : 'false',
+                        deliveryToken: verificationData.deliveryToken,
+                        deliveryDuration: order.driverAssignment.duration?.actual || 0
+                    },
+                    metadata: {
+                        orderId: order._id,
+                        orderRef: order.orderRef,
+                        driverId: userData._id,
+                        deliveryProof: {
+                            photos: photoUrls,
+                            video: videoUrl,
+                            recipientName: verificationData.recipientName.trim()
+                        }
+                    },
+                    priority: 'HIGH'
+                });
 
-            return res.status(200).json({
+                // 2. Notify DRIVER - Delivery completed with earnings
+                await NotificationService.createNotification({
+                    userId: userData._id,
+                    type: 'driver.delivery_completed',
+                    templateData: {
+                        orderRef: order.orderRef,
+                        orderId: order._id.toString(),
+                        clientId: order.clientId.toString(),
+                        earnings: finalEarnings.toFixed(2),
+                        totalDeliveries: (await Driver.findById(userData._id))?.performance?.totalDeliveries || 0,
+                        deliveryDuration: order.driverAssignment.duration?.actual || 0
+                    },
+                    metadata: {
+                        orderId: order._id,
+                        orderRef: order.orderRef,
+                        earnings: finalEarnings,
+                        requiresRating: true
+                    },
+                    priority: 'HIGH'
+                });
+
+                // 3. Schedule rating reminders (10 minutes after delivery)
+                const reminderTime = new Date(now.getTime() + 10 * 60 * 1000); // 10 mins
+
+                // Client rating reminder
+                await NotificationService.createNotification({
+                    userId: order.clientId,
+                    type: 'client.rating_reminder',
+                    templateData: {
+                        orderRef: order.orderRef,
+                        orderId: order._id.toString(),
+                        driverName: userData.fullName || userData.name
+                    },
+                    scheduleFor: reminderTime,
+                    priority: 'LOW'
+                });
+
+                // Driver rating reminder
+                await NotificationService.createNotification({
+                    userId: userData._id,
+                    type: 'driver.rating_reminder',
+                    templateData: {
+                        orderRef: order.orderRef,
+                        orderId: order._id.toString()
+                    },
+                    scheduleFor: reminderTime,
+                    priority: 'LOW'
+                });
+
+                // 4. Check for milestones
+
+                const totalDeliveries = driver?.performance?.totalDeliveries || 0;
+                const milestones = [10, 25, 50, 100, 250, 500, 1000];
+
+                if (milestones.includes(totalDeliveries)) {
+                    const bonusAmount = totalDeliveries * 10; // Example: ₦10 per delivery milestone
+
+                    await NotificationService.createNotification({
+                        userId: userData._id,
+                        type: 'driver.milestone_achieved',
+                        templateData: {
+                            milestoneCount: totalDeliveries.toString(),
+                            bonusMessage: `You've earned a ₦${bonusAmount} bonus!`,
+                            bonusAmount: bonusAmount.toString(),
+                            nextMilestoneCount: (milestones.find(m => m > totalDeliveries) || totalDeliveries + 100).toString()
+                        },
+                        priority: 'NORMAL'
+                    });
+                }
+
+                // 5. Notify admin (optional - for monitoring)
+                // const admins = await NotificationService.getAdminUsers();
+                // for (const admin of admins.slice(0, 2)) { // Only notify 2 admins
+                //     await NotificationService.createNotification({
+                //         userId: admin._id,
+                //         type: 'admin.delivery_completed',
+                //         templateData: {
+                //             orderRef: order.orderRef,
+                //             orderId: order._id.toString(),
+                //             driverName: userData.fullName || userData.name,
+                //             driverId: userData._id.toString(),
+                //             clientName: client.fullName || 'Client',
+                //             deliveryDuration: (order.driverAssignment.duration?.actual || 0).toString(),
+                //             earnings: finalEarnings.toFixed(2),
+                //             penalties: penalty.toFixed(2),
+                //             rating: 'Pending'
+                //         },
+                //         priority: 'NORMAL'
+                //     });
+                // }
+
+                // 6. TODO: Send SMS to client
+                // await SMSService.send({
+                //     to: order.location.dropOff.contactPerson?.phone,
+                //     message: `Your order ${order.orderRef} has been delivered. Rate your experience: [link]`
+                // });
+
+            } catch (notificationError) {
+                console.log('❌ Notification error:', notificationError);
+                // Don't fail the request if notifications fail
+            }
+
+            // send a non blocking mail
+            try {
+                // 7. TODO: Send email receipt to client
+                await MailClient.deliverySuccessClient(client?.email, order.orderRef, order.driverAssignment.duration?.actual, order.driverAssignment?.driverInfo.name);
+            } catch(err) {
+                console.log(err.message)
+            }
+            try {
+                // 7. TODO: Send email receipt to driver
+                await MailClient.deliverySuccessDriver(order.driverAssignment?.driverInfo.email, order.orderRef, order.driverAssignment.duration?.actual, client.fullName);
+            } catch(err){
+                console.log(err.message)
+            }
+
+            const response = {
                 success: true,
-                message: "Delivery completed successfully",
+                message: "🎉 Delivery completed successfully!",
+                order: {
+                    _id: order._id,
+                    orderRef: order.orderRef,
+                    status: order.status,
+                    deliveredAt: now,
+                    deliveryDuration: order.driverAssignment.duration?.actual,
+                    recipient: verificationData.recipientName.trim()
+                },
+                verification: {
+                    recipientName: verificationData.recipientName.trim(),
+                    photosUploaded: photoUrls.length,
+                    videoUploaded: !!videoUrl,
+                    tokenVerified: true
+                },
                 earnings: {
                     base: baseEarnings,
                     penalty: penalty,
                     final: finalEarnings,
+                    currency: order.pricing?.currency || 'NGN',
                     breakdown: penalty > 0 ? {
                         baseEarnings: `₦${baseEarnings.toFixed(2)}`,
                         penalty: `-₦${penalty.toFixed(2)}`,
-                        finalEarnings: `₦${finalEarnings.toFixed(2)}`
+                        finalEarnings: `₦${finalEarnings.toFixed(2)}`,
+                        note: penalty > 0 ? 'Penalty applied for late arrival' : null
                     } : null
+                },
+                requiresRating: true,
+                nextAction: {
+                    action: 'SHOW_RATING',
+                    route: '/driver/discover/review',
+                    params: {
+                        orderId: order._id,
+                        orderRef: order.orderRef,
+                        clientId: order.clientId,
+                        earnings: finalEarnings
+                    }
                 }
-            });
+            };
+
+            return res.status(200).json(response);
 
         } catch (error) {
-            console.log('Confirm delivery error:', error);
+            console.log('❌ Complete delivery error:', error);
+
             return res.status(500).json({
-                error: "An error occurred while confirming delivery"
+                error: "An error occurred while completing delivery",
+                ...(process.env.NODE_ENV === 'development' && {
+                    details: error.message
+                })
             });
         }
     }
@@ -2827,12 +3184,12 @@ class DriverController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { orderId, reason } = req.body;
+        const {userData} = preCheckResult;
+        const {orderId, reason} = req.body;
 
         if (!orderId || !reason) {
             return res.status(400).json({
@@ -2841,13 +3198,13 @@ class DriverController {
         }
 
         try {
-            const { Order } = await getOrderModels();
-            const { Driver } = await getModels();
+            const {Order} = await getOrderModels();
+            const {Driver} = await getModels();
 
             const order = await Order.findById(orderId);
 
             if (!order) {
-                return res.status(404).json({ error: "Order not found" });
+                return res.status(404).json({error: "Order not found"});
             }
 
             // Calculate cancellation penalty
@@ -2935,20 +3292,20 @@ class DriverController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { orderId } = req.params;
+        const {userData} = preCheckResult;
+        const {orderId} = req.params;
 
         try {
-            const { Order } = await getOrderModels();
+            const {Order} = await getOrderModels();
 
             const order = await Order.findById(orderId).lean();
 
             if (!order) {
-                return res.status(404).json({ error: "Order not found" });
+                return res.status(404).json({error: "Order not found"});
             }
 
             // Verify driver is assigned to this order
@@ -2981,12 +3338,12 @@ class DriverController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { orderId, issueType, description, photos } = req.body;
+        const {userData} = preCheckResult;
+        const {orderId, issueType, description, photos} = req.body;
 
         if (!orderId || !issueType || !description) {
             return res.status(400).json({
@@ -2995,12 +3352,12 @@ class DriverController {
         }
 
         try {
-            const { Order } = await getOrderModels();
+            const {Order} = await getOrderModels();
 
             const order = await Order.findById(orderId);
 
             if (!order) {
-                return res.status(404).json({ error: "Order not found" });
+                return res.status(404).json({error: "Order not found"});
             }
 
             // Log issue in communications
@@ -3040,12 +3397,12 @@ class DriverController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { orderId, stage, locationDetails } = req.body;
+        const {userData} = preCheckResult;
+        const {orderId, stage, locationDetails} = req.body;
         if (!orderId || !stage || !locationDetails) {
             return res.status(400).json({
                 error: "Order ID, stage, and location details are required"
@@ -3059,14 +3416,17 @@ class DriverController {
         }
 
         try {
-            const { Order } = await getOrderModels();
+            const {Order} = await getOrderModels();
             const {Driver} = await getModels();
 
             const order = await Order.findById(orderId);
 
             if (!order) {
-                return res.status(404).json({ error: "Order not found" });
+                return res.status(404).json({error: "Order not found"});
             }
+            // update status to arrived_pickup
+            order.status = 'arrived_pickup';
+            await order.save();
 
             order.orderTrackingHistory.push({
                 status: 'arrived_at_pickup',
@@ -3168,12 +3528,12 @@ class DriverController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { orderId, stage, verificationData, currentLocation } = req.body;
+        const {userData} = preCheckResult;
+        const {orderId, stage, verificationData, currentLocation} = req.body;
 
         if (!orderId) {
             return res.status(400).json({
@@ -3192,8 +3552,6 @@ class DriverController {
                 error: "Current location data is required"
             });
         }
-
-
 
         // Validate required verification fields
         const requiredFields = ['packageCondition', 'contactPersonVerified'];
@@ -3221,12 +3579,12 @@ class DriverController {
         }
 
         try {
-            const { Order } = await getOrderModels();
+            const {Order} = await getOrderModels();
 
             const order = await Order.findById(orderId);
 
             if (!order) {
-                return res.status(404).json({ error: "Order not found" });
+                return res.status(404).json({error: "Order not found"});
             }
 
             // Verify driver is assigned to this order
@@ -3245,7 +3603,7 @@ class DriverController {
             }
 
             // Check if already confirmed
-            if (order.status === 'picked_up-confirmed') {
+            if (order.status === 'pickedUp-confirmed') {
                 return res.status(400).json({
                     error: "Package has already been picked up"
                 });
@@ -3322,7 +3680,7 @@ class DriverController {
             };
 
             // Update main status
-            order.status = 'picked_up-confirmed';
+            order.status = 'pickedUp-confirmed';
 
             // Update driver assignment tracking
             if (!order.driverAssignment.actualTimes) {
@@ -3524,8 +3882,235 @@ class DriverController {
         }
     }
 
+    static async arrivedDropOff(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
 
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
 
+        const {userData} = preCheckResult;
+        const {orderId, stage, locationDetails} = req.body;
+        if (!orderId || !stage || !locationDetails) {
+            return res.status(400).json({
+                error: "Order ID, stage, and location details are required"
+            });
+        }
+
+        if (stage !== 'arrived_dropoff') {
+            return res.status(400).json({
+                error: "Invalid delivery status"
+            });
+        }
+
+        try {
+            const {Order} = await getOrderModels();
+            const {Driver} = await getModels();
+
+            const order = await Order.findById(orderId);
+
+            if (!order) {
+                return res.status(404).json({error: "Order not found"});
+            }
+
+            order.status = 'arrived_dropoff';
+            await order.save();
+
+            order.orderTrackingHistory.push({
+                status: 'arrived_at_dropoff',
+                timestamp: new Date(),
+                title: 'Driver at DropOff',
+                description: 'Driver has arrived at package destination location',
+                icon: '📍',
+                updatedBy: {
+                    role: 'system',
+                    name: 'AAngLogistics System'
+                },
+                isCompleted: true,
+                isCurrent: true
+            });
+
+            await Driver.findByIdAndUpdate(
+                userData._id,
+                {
+                    $set: {
+                        'currentLocation.coordinates': {
+                            lat: locationDetails.lat,
+                            lng: locationDetails.lng
+                        },
+                        'currentLocation.accuracy': locationDetails.accuracy || 0,
+                        'currentLocation.speed': locationDetails.speed || 0,
+                        'currentLocation.isMoving': (locationDetails.speed || 0) > 1,
+                        'currentLocation.timestamp': new Date(),
+                        'operationalStatus.lastLocationUpdate': new Date()
+                    }
+                }
+            );
+            // ⚠️ SEND NOTIFICATIONS (New section)
+            try {
+
+                // Notify client
+                await NotificationService.createNotification({
+                    userId: order.clientId,
+                    type: 'delivery.driver_arrived_dst',
+                    templateData: {
+                        orderRef: order.orderRef,
+                        orderId: order._id.toString(),
+                        driverName: userData.fullName,
+                        driverPhone: userData.phoneNumber,
+                        vehicleType: userData.vehicleDetails.type,
+                        vehicleNumber: userData.vehicleDetails.plateNumber
+                    },
+                    metadata: {
+                        orderId: order._id,
+                        orderRef: order.orderRef,
+                        driverId: userData._id,
+                    },
+                    priority: 'HIGH'
+                });
+
+                console.log('✅ Notifications sent successfully');
+            } catch (notificationError) {
+                console.log('⚠️ Notification error (non-blocking):', notificationError);
+            }
+
+            return res.status(200).json({
+                success: true,
+                message: "Driver has arrived at pickup location."
+            });
+        } catch (error) {
+            console.log('Report issue error:', error);
+            return res.status(500).json({
+                error: "An error occurred while reporting issue"
+            });
+        }
+
+    }
+
+    /**
+     * Verify Delivery Token
+     * POST /api/driver/order/verify-delivery-token
+     *
+     * Body: {
+     *   orderId: string,
+     *   deliveryToken: string (6 characters)
+     * }
+     */
+    static async verifyDeliveryToken(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const {orderId, deliveryToken, stage} = req.body;
+
+        // Validate payload
+        if (!orderId || !deliveryToken || !stage) {
+            return res.status(400).json({error: "Invalid payload requirement"});
+        }
+
+        // Validate token length
+        if (deliveryToken.length !== 6) {
+            return res.status(400).json({error: "Delivery token must be exactly 6 characters"});
+        }
+
+        if (stage !== 'arrived_dropoff') {
+            return res.status(400).json({error: "Forbidden stage type"});
+        }
+
+        try {
+            const {Order} = await getOrderModels();
+            const order = await Order.findById(orderId);
+
+            if (!order) {
+                return res.status(404).json({error: "Order not found"});
+            }
+
+            // Verify driver is assigned to this order
+            if (!order.driverAssignment?.driverId ||
+                order.driverAssignment.driverId.toString() !== userData._id.toString()) {
+                return res.status(403).json({error: "You are not assigned to this order"});
+            }
+
+            // Verify order is at dropoff stage
+            if (order.status !== stage) {
+                return res.status(400).json({
+                    error: `Order: Forbidden delivery stage`
+                });
+            }
+
+            // Check if token already verified
+            if (order.tokenVerified?.verified) {
+                return res.status(400).json({
+                    error: "Delivery token has already been verified",
+                    verifiedAt: order.tokenVerified.verifiedAt
+                });
+            }
+
+            // Verify token matches (case-sensitive)
+            if (order.deliveryToken !== deliveryToken) {
+                // Log failed attempt for security
+                console.log(`Failed token verification attempt for order ${orderId} by driver ${userData._id}`);
+
+                return res.status(401).json({
+                    error: "Invalid delivery token. Please check and try again.",
+                    hint: "Token is case-sensitive (e.g., A3X9K2)"
+                });
+            }
+
+            await Order.findByIdAndUpdate(orderId, {
+                $set: {
+                    'tokenVerified.verified': true,
+                    'tokenVerified.verifiedAt': new Date(),
+                    'tokenVerified.verifiedBy': {
+                        name: 'AAngLogistics System',
+                    }
+                }
+            }, {runValidators: true});
+
+            order.orderTrackingHistory.push({
+                status: 'package_delivered',
+                timestamp: new Date(),
+                title: 'Delivery Token Verified',
+                description: `Token verified by ${userData.fullName || 'driver'}`,
+                icon: '🔑',
+                metadata: {
+                    driverId: userData._id,
+                    driverName: userData.fullName,
+                    verificationMethod: 'token'
+                },
+                updatedBy: {
+                    role: 'driver',
+                    name: userData.fullName || userData.name
+                },
+                isCompleted: false,
+                isCurrent: false
+            });
+
+            await order.save();
+
+            return res.status(200).json({
+                success: true,
+                message: "Delivery token verified successfully",
+                verifiedAt: order.tokenVerified.verifiedAt,
+                recipientExpected: order.location.dropOff.contactPerson?.name || 'Not specified'
+            });
+
+        } catch (error) {
+            console.error('Verify delivery token error:', error);
+            return res.status(500).json({
+                error: "An error occurred while verifying delivery token"
+            });
+        }
+    }
 
 }
 

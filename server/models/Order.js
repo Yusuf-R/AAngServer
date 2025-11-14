@@ -165,8 +165,9 @@ const OrderTrackingHistorySchema = new Schema({
             'package_picked_up',
 
             // Transit Phase
-            'in_transit',
-            'arrived_at_destination',
+            'en_route_to_dropoff',
+            'arrived_at_dropoff',
+            'package_delivered',
 
             // Completion Phase
             'delivery_completed',
@@ -225,6 +226,7 @@ const DriverAssignedTrackingSchema = new Schema({
     driverId: {type: Schema.Types.ObjectId, ref: 'Base', index: true},
     driverInfo: {
         name: String,
+        email: String,
         phone: String,
         vehicleType: String,
         vehicleNumber: String,
@@ -351,7 +353,7 @@ const OrderSchema = new Schema({
             'pending',         // Waiting for driver assignment
             'broadcast',       // Broadcasted to available drivers
             'assigned',        // Driver assigned
-            'picked_up-confirmed',       // Driver confirmed pickup
+            'pickedUp-confirmed',       // Driver confirmed pickup
             'en_route_pickup', // Driver heading to pickup
             'en_route_dropoff', // Driver heading to pickup
             'arrived_pickup',  // Driver at pickup location
@@ -374,7 +376,6 @@ const OrderSchema = new Schema({
         verifiedAt: Date,
         verifiedBy: {
             name: String,
-            phone: String
         }
     },
     pickupConfirmation: {
@@ -412,12 +413,29 @@ const OrderSchema = new Schema({
         clientRating: {
             stars: {type: Number, min: 1, max: 5},
             feedback: String,
-            ratedAt: Date
+            categories: [{  // NEW: Specific feedback categories
+                category: {type: String, enum: ['professionalism', 'timeliness', 'communication', 'care']},
+                rating: {type: Number, min: 1, max: 5}
+            }],
+            wouldRecommend: {type: Boolean},  // NEW
+            ratedAt: Date,
+            canEdit: {type: Boolean, default: true}  // NEW: Allow one-time edit
         },
         driverRating: {
             stars: {type: Number, min: 1, max: 5},
             feedback: String,
-            ratedAt: Date
+            categories: [{  // NEW
+                category: {type: String, enum: ['communication', 'package_condition', 'location_accuracy', 'payment']},
+                rating: {type: Number, min: 1, max: 5}
+            }],
+            wouldRecommend: {type: Boolean},  // NEW
+            ratedAt: Date,
+            canEdit: {type: Boolean, default: true}  // NEW
+        },
+        // NEW: Track if ratings are pending
+        pendingRatings: {
+            client: {type: Boolean, default: true},
+            driver: {type: Boolean, default: true}
         }
     },
 

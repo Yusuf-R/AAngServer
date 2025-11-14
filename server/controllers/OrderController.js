@@ -1544,7 +1544,7 @@ class OrderController {
                         'payment.status': PAYMENT_STATUS.PAID,
                         'payment.paidAt': new Date(),
                         'payment.webhookData': data,
-                        'status': ORDER_STATUS.CONFIRMED,
+                        'status': ORDER_STATUS.ADMIN_REVIEW,
                         'metadata.draftProgress.step': 4,
                         'metadata.draftProgress.fieldCompletion.payment': true,
                         'metadata.draftProgress.completedAt': new Date(),
@@ -1555,7 +1555,7 @@ class OrderController {
                     },
                     $push: {
                         orderInstantHistory: {
-                            status: ORDER_STATUS.CONFIRMED,
+                            status: ORDER_STATUS.ADMIN_REVIEW,
                             timestamp: new Date(),
                             updatedBy: {
                                 userId: order.clientId,

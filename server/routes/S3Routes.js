@@ -18,6 +18,8 @@ s3Router.options('*', cors(corsOptions));
 s3Router.post('/presigned-url', s3Controller.GeneratePresignedUrl);
 s3Router.post('/driver/presigned-url', s3Controller.GenerateDriverPresignedUrl);
 s3Router.post('/driver/confirmation-presigned-url', s3Controller.GenerateDriverConfirmationPresignedUrl);
+s3Router.post('/driver/pickup-presigned-url', s3Controller.GenerateDriverPickUpConfirmationPresignedUrl);
+s3Router.post('/driver/dropoff-presigned-url', s3Controller.GenerateDriverDropOffConfirmationPresignedUrl);
 s3Router.get('/driver/order-media', s3Controller.ListOrderMedia);
 s3Router.delete('/delete', s3Controller.DeleteFile);
 

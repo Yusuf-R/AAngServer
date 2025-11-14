@@ -50,7 +50,16 @@ const NotificationSchema = new mongoose.Schema({
             'delivery.failed',
             'delivery.delayed',
             'delivery.location_update',
-
+            'delivery.completed_detailed',
+            'delivery.driver_arrived_dst',
+            'delivery.driver_arrived_src',
+            'delivery.completed',
+            'driver.delivery_completed',
+            'driver.milestone_achieved',
+            'client.rating_reminder',
+            'driver.rating_reminder',
+            'admin.delivery_completed',
+            'delivery.completed_with_issues',
 
             // DRIVER category (NEW)
             'driver.order_assigned',      // ⚠️ ADD THIS

@@ -78,6 +78,251 @@ class NotificationService extends EventEmitter {
             ]
         });
 
+        this.templates.set('delivery.driver_arrived_dst', {
+            title: '🚚 Driver Arrived!',
+            body: '{driverName} has arrived at your drop off location.',
+            priority: 'HIGH',
+            channels: { push: true, inApp: true, sms: true },
+            actionButtons: [
+                { label: 'Track Live', action: 'track', deepLink: '/tracking/track' },
+                { label: 'Contact Driver', action: 'call', deepLink: 'tel:{driverPhone}' }
+            ]
+        });
+
+        this.templates.set('delivery.completed', {
+            title: '🎉 Delivery Completed!',
+            body: 'Your package has been successfully delivered to {recipientName}. Order {orderRef} is now complete.',
+            orderRef: '{orderRef}',
+            priority: 'HIGH',
+            channels: { push: true, inApp: true, sms: true, email: true },
+            actionButtons: [
+                {
+                    label: 'View Receipt',
+                    action: 'view',
+                    deepLink: '/client/orders/{orderId}/receipt'
+                },
+                {
+                    label: 'Rate Driver',
+                    action: 'rate',
+                    deepLink: '/client/orders/{orderId}/rate'
+                },
+                {
+                    label: 'View Photos',
+                    action: 'photos',
+                    deepLink: '/client/orders/{orderId}/proof'
+                }
+            ],
+            richContent: {
+                imageUrl: '{deliveryPhotoUrl}', // First delivery photo
+                customData: {
+                    showConfetti: true, // Trigger confetti animation
+                    deliveredAt: '{deliveredAt}',
+                    deliveryDuration: '{deliveryDuration}'
+                }
+            }
+        });
+
+        this.templates.set('driver.delivery_completed', {
+            title: '💰 Delivery Complete - You Earned ₦{earnings}!',
+            body: 'Great job! You successfully delivered order {orderRef}. Your earnings have been added to your wallet.',
+            orderRef: '{orderRef}',
+            priority: 'HIGH',
+            channels: { push: true, inApp: true },
+            actionButtons: [
+                {
+                    label: 'Rate Client',
+                    action: 'rate',
+                    deepLink: '/driver/discover/review?orderId={orderId}&orderRef={orderRef}&clientId={clientId}&earnings={earnings}'
+                },
+                {
+                    label: 'View Earnings',
+                    action: 'wallet',
+                    deepLink: '/driver/wallet'
+                },
+                {
+                    label: 'Find More Orders',
+                    action: 'discover',
+                    deepLink: '/driver/discover'
+                }
+            ],
+            richContent: {
+                customData: {
+                    celebrationMode: true,
+                    earnings: '{earnings}',
+                    totalDeliveries: '{totalDeliveries}',
+                    deliveryDuration: '{deliveryDuration}'
+                }
+            }
+        });
+
+        this.templates.set('delivery.completed_detailed', {
+            title: '📦 Package Delivered Successfully',
+            body: 'Your order {orderRef} was delivered by {driverName} at {deliveryTime}. Delivered to: {recipientName}',
+            orderRef: '{orderRef}',
+            priority: 'HIGH',
+            channels: { push: true, inApp: true, email: true },
+            actionButtons: [
+                {
+                    label: 'View Delivery Proof',
+                    action: 'proof',
+                    deepLink: '/client/orders/{orderId}/proof'
+                },
+                {
+                    label: 'Rate & Review',
+                    action: 'rate',
+                    deepLink: '/client/orders/{orderId}/rate'
+                },
+                {
+                    label: 'Download Receipt',
+                    action: 'receipt',
+                    deepLink: '/client/orders/{orderId}/receipt/download'
+                },
+                {
+                    label: 'Need Help?',
+                    action: 'support',
+                    deepLink: '/client/support?orderId={orderId}'
+                }
+            ],
+            richContent: {
+                imageUrl: '{deliveryPhotoUrl}',
+                customData: {
+                    driverName: '{driverName}',
+                    driverPhoto: '{driverPhotoUrl}',
+                    deliveryToken: '{deliveryToken}',
+                    recipientName: '{recipientName}',
+                    deliveredAt: '{deliveredAt}',
+                    deliveryPhotos: '{deliveryPhotosArray}', // Array of photo URLs
+                    hasVideo: '{hasVideo}',
+                    deliveryDuration: '{deliveryDuration}'
+                }
+            }
+        });
+
+        this.templates.set('driver.milestone_achieved', {
+            title: '🏆 Milestone Achieved!',
+            body: 'Congratulations! You\'ve completed {milestoneCount} deliveries. {bonusMessage}',
+            priority: 'NORMAL',
+            channels: { push: true, inApp: true },
+            actionButtons: [
+                {
+                    label: 'View Stats',
+                    action: 'stats',
+                    deepLink: '/driver/performance'
+                },
+                {
+                    label: 'Claim Bonus',
+                    action: 'bonus',
+                    deepLink: '/driver/bonuses'
+                }
+            ],
+            richContent: {
+                customData: {
+                    milestone: '{milestoneCount}',
+                    bonus: '{bonusAmount}',
+                    nextMilestone: '{nextMilestoneCount}'
+                }
+            }
+        });
+
+        this.templates.set('client.rating_reminder', {
+            title: '⭐ How Was Your Delivery Experience?',
+            body: 'Your feedback helps us improve. Please rate your experience with {driverName} for order {orderRef}.',
+            orderRef: '{orderRef}',
+            priority: 'LOW',
+            channels: { push: true, inApp: true },
+            actionButtons: [
+                {
+                    label: 'Rate Now',
+                    action: 'rate',
+                    deepLink: '/client/orders/{orderId}/rate'
+                },
+                {
+                    label: 'Maybe Later',
+                    action: 'dismiss'
+                }
+            ]
+        });
+
+        this.templates.set('driver.rating_reminder', {
+            title: '⭐ Rate Your Recent Delivery',
+            body: 'Help us improve! Share your experience with the client from order {orderRef}.',
+            orderRef: '{orderRef}',
+            priority: 'LOW',
+            channels: { push: true, inApp: true },
+            actionButtons: [
+                {
+                    label: 'Rate Client',
+                    action: 'rate',
+                    deepLink: '/driver/discover/review?orderId={orderId}'
+                },
+                {
+                    label: 'Skip',
+                    action: 'dismiss'
+                }
+            ]
+        });
+
+        this.templates.set('admin.delivery_completed', {
+            title: '📊 Delivery Completed',
+            body: 'Order {orderRef} delivered by {driverName}. Duration: {deliveryDuration}min. Client: {clientName}.',
+            orderRef: '{orderRef}',
+            priority: 'NORMAL',
+            channels: { inApp: true },
+            actionButtons: [
+                {
+                    label: 'View Order',
+                    action: 'view',
+                    deepLink: '/admin/orders/{orderId}'
+                },
+                {
+                    label: 'View Driver',
+                    action: 'driver',
+                    deepLink: '/admin/drivers/{driverId}'
+                }
+            ],
+            richContent: {
+                customData: {
+                    earnings: '{earnings}',
+                    penalties: '{penalties}',
+                    rating: '{rating}',
+                    deliveryDuration: '{deliveryDuration}'
+                }
+            }
+        });
+
+        this.templates.set('delivery.completed_with_issues', {
+            title: '⚠️ Delivery Completed - Issue Reported',
+            body: 'Your order {orderRef} has been delivered, but the driver reported: {issueDescription}. Our support team will contact you shortly.',
+            orderRef: '{orderRef}',
+            priority: 'URGENT',
+            channels: { push: true, inApp: true, sms: true, email: true },
+            actionButtons: [
+                {
+                    label: 'View Report',
+                    action: 'report',
+                    deepLink: '/client/orders/{orderId}/issue-report'
+                },
+                {
+                    label: 'Contact Support',
+                    action: 'support',
+                    deepLink: '/client/support?orderId={orderId}&urgent=true'
+                },
+                {
+                    label: 'View Proof',
+                    action: 'proof',
+                    deepLink: '/client/orders/{orderId}/proof'
+                }
+            ]
+        });
+
+
+
+
+
+
+
+
+
 
 
 
@@ -479,7 +724,6 @@ class NotificationService extends EventEmitter {
         return template.replace(/\{(\w+)\}/g, (match, key) => data[key] || match);
     }
 
-    // Deliver notification through appropriate channels
     /**
      * Deliver a notification through all configured channels
      * This method handles:

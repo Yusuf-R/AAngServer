@@ -61,7 +61,11 @@ driverRouter.get('/orders/get/available', driverController.getAvailableOrders);
 driverRouter.patch('/order/accept', driverController.acceptOrder);
 driverRouter.patch('/order/location/update', driverController.updateActiveDeliveryLocation);
 driverRouter.patch('/order/arrived-pickup', driverController.arrivedPickUp)
-driverRouter.patch('/confirm-pickup', driverController.confirmPickUp)
+driverRouter.patch('/order/confirm-pickup', driverController.confirmPickUp)
+driverRouter.patch('/order/arrived-dropoff', driverController.arrivedDropOff)
+driverRouter.patch('/order/verify/delivery-token', driverController.verifyDeliveryToken)
+driverRouter.patch('/order/complete-delivery', driverController.completeDelivery)
+
 
 
 
