@@ -3108,19 +3108,25 @@ class DriverController {
             try {
                 // 7. TODO: Send email receipt to client
                 await MailClient.deliverySuccessClient(client?.email, order.orderRef, order.driverAssignment.duration?.actual, order.driverAssignment?.driverInfo.name);
-            } catch(err) {
+            } catch (err) {
                 console.log(err.message)
             }
             try {
                 // 7. TODO: Send email receipt to driver
                 await MailClient.deliverySuccessDriver(order.driverAssignment?.driverInfo.email, order.orderRef, order.driverAssignment.duration?.actual, client.fullName);
-            } catch(err){
+            } catch (err) {
                 console.log(err.message)
+            }
+
+            const dashboardData = await DriverController.userDashBoardData(userData);
+            if (!dashboardData) {
+                return res.status(404).json({error: "Dashboard data not found"});
             }
 
             const response = {
                 success: true,
                 message: "🎉 Delivery completed successfully!",
+                userData: dashboardData,
                 order: {
                     _id: order._id,
                     orderRef: order.orderRef,
@@ -3149,14 +3155,10 @@ class DriverController {
                 },
                 requiresRating: true,
                 nextAction: {
-                    action: 'SHOW_RATING',
-                    route: '/driver/discover/review',
-                    params: {
-                        orderId: order._id,
-                        orderRef: order.orderRef,
-                        clientId: order.clientId,
-                        earnings: finalEarnings
-                    }
+                    orderId: order._id,
+                    orderRef: order.orderRef,
+                    clientId: order.clientId,
+                    earnings: finalEarnings
                 }
             };
 
@@ -4110,6 +4112,125 @@ class DriverController {
                 error: "An error occurred while verifying delivery token"
             });
         }
+    }
+
+    static async reviewDelivery(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const {orderId, rating} = req.body; // Changed from ratingData to rating to match your payload
+
+        console.log('📝 Driver submitting rating:', {
+            orderId,
+            rating,
+            driverId: userData.id
+        });
+
+        if (!orderId || !rating) {
+            return res.status(400).json({error: "Order ID and rating data are required"});
+        }
+
+        // Validate rating structure
+        if (!rating.stars || rating.stars < 1 || rating.stars > 5) {
+            return res.status(400).json({error: "Valid star rating (1-5) is required"});
+        }
+
+        try {
+            const {Order} = await getOrderModels();
+
+            // Find the order and verify driver has access
+            const order = await Order.findById(orderId);
+            if (!order) {
+                return res.status(404).json({error: "Order not found"});
+            }
+
+            // Verify this driver was assigned to this order
+            if (order.driverAssignment.driverId.toString() !== userData.id) {
+                return res.status(403).json({error: "Not authorized to rate this order"});
+            }
+
+            // Check if driver has already rated this order
+            if (order.rating.clientRating.ratedAt) {
+                return res.status(400).json({error: "You have already rated this delivery"});
+            }
+
+            // Validate categories if provided
+            if (rating.categories && Array.isArray(rating.categories)) {
+                const validCategories = ['communication', 'package_condition', 'location_accuracy', 'logistics'];
+                for (const category of rating.categories) {
+                    if (!validCategories.includes(category.category)) {
+                        return res.status(400).json({error: `Invalid category: ${category.category}`});
+                    }
+                    if (category.rating < 1 || category.rating > 5) {
+                        return res.status(400).json({error: `Invalid rating for category ${category.category}`});
+                    }
+                }
+            }
+
+            // Prepare the client rating data
+            const clientRatingData = {
+                stars: rating.stars,
+                feedback: rating.feedback || "",
+                categories: rating.categories || [],
+                wouldRecommend: rating.wouldRecommend || null,
+                ratedAt: new Date(),
+                canEdit: true // Allow one-time edit within time window
+            };
+
+            // Update the order with driver's rating
+            const updatedOrder = await Order.findByIdAndUpdate(
+                orderId,
+                {
+                    $set: {
+                        'rating.clientRating': clientRatingData,
+                        'rating.pendingRatings.client': false
+                    }
+                },
+                { new: true }
+            );
+
+            console.log('✅ Driver rating submitted successfully');
+
+            // TODO: Update client's aggregated rating summary (you'll implement this later)
+            // await updateClientRatingSummary(order.clientId, clientRatingData);
+
+            return res.status(200).json({
+                success: true,
+                message: "Rating submitted successfully",
+            });
+
+        } catch (error) {
+            console.error('❌ Review delivery error:', error);
+            return res.status(500).json({
+                error: "An error occurred while submitting your rating"
+            });
+        }
+    }
+
+    static async driverData (req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const driverData = await DriverController.userDashBoardData(userData);
+        if (!driverData) {
+            return res.status(404).json({error: "Dashboard data not found"});
+        }
+        return res.status(200).json(driverData);
+
     }
 
 }

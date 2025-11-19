@@ -425,7 +425,7 @@ const OrderSchema = new Schema({
             stars: {type: Number, min: 1, max: 5},
             feedback: String,
             categories: [{  // NEW
-                category: {type: String, enum: ['communication', 'package_condition', 'location_accuracy', 'payment']},
+                category: {type: String, enum: ['communication', 'package_condition', 'location_accuracy', 'logistics']},
                 rating: {type: Number, min: 1, max: 5}
             }],
             wouldRecommend: {type: Boolean},  // NEW

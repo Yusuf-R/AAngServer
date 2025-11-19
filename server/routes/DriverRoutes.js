@@ -65,6 +65,11 @@ driverRouter.patch('/order/confirm-pickup', driverController.confirmPickUp)
 driverRouter.patch('/order/arrived-dropoff', driverController.arrivedDropOff)
 driverRouter.patch('/order/verify/delivery-token', driverController.verifyDeliveryToken)
 driverRouter.patch('/order/complete-delivery', driverController.completeDelivery)
+driverRouter.patch('/order/submit/review', driverController.reviewDelivery)
+
+// get dashboard data
+driverRouter.get('/dashboard/data', driverController.driverData)
+
 
 
 

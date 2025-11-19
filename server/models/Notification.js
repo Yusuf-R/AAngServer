@@ -23,6 +23,7 @@ const NotificationSchema = new mongoose.Schema({
             'SOCIAL',     // Messages, reviews, community
             'PROMOTION',   // Marketing and promotional content
             'DRIVER',      // Driver notifications
+            'CLIENT',
         ],
         required: true,
         index: true,
