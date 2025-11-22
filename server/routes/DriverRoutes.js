@@ -69,6 +69,12 @@ driverRouter.patch('/order/submit/review', driverController.reviewDelivery)
 
 // get dashboard data
 driverRouter.get('/dashboard/data', driverController.driverData)
+driverRouter.get('/analytics', driverController.driverAnalytics)
+driverRouter.get('/earning/analytics', driverController.driverAnalytics)
+driverRouter.get('/delivery/analytics', driverController.driverDeliveryAnalytics)
+driverRouter.get('/delivery/:orderId', driverController.getSingleDelivery)
+driverRouter.post('/analytics/migrate', driverController.migrateAnalytics)
+
 
 
 

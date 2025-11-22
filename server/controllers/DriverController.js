@@ -4,6 +4,8 @@ import getModels from "../models/AAng/AAngLogistics";
 import locationSchema from "../validators/locationValidator";
 import mongoose from "mongoose";
 import getOrderModels from "../models/Order";
+import getAnalyticsModels from "../models/Analytics/DriverAnalytics";
+import AnalyticsMigration from '../utils/migrateAnalytics.js';
 import MailClient from "../utils/mailer";
 import NotificationService from "../services/NotificationService";
 import Notification from '../models/Notification';
@@ -2960,7 +2962,6 @@ class DriverController {
                                 reference: order.orderRef
                             }],
                             $position: 0,
-                            $slice: 50 // Keep last 50 transactions
                         }
                     }
                 }
@@ -4127,12 +4128,6 @@ class DriverController {
         const {userData} = preCheckResult;
         const {orderId, rating} = req.body; // Changed from ratingData to rating to match your payload
 
-        console.log('📝 Driver submitting rating:', {
-            orderId,
-            rating,
-            driverId: userData.id
-        });
-
         if (!orderId || !rating) {
             return res.status(400).json({error: "Order ID and rating data are required"});
         }
@@ -4193,7 +4188,7 @@ class DriverController {
                         'rating.pendingRatings.client': false
                     }
                 },
-                { new: true }
+                {new: true}
             );
 
             console.log('✅ Driver rating submitted successfully');
@@ -4214,7 +4209,7 @@ class DriverController {
         }
     }
 
-    static async driverData (req, res) {
+    static async driverData(req, res) {
         const preCheckResult = await AuthController.apiPreCheck(req);
 
         if (!preCheckResult.success) {
@@ -4231,6 +4226,413 @@ class DriverController {
         }
         return res.status(200).json(driverData);
 
+    }
+
+    static async driverAnalytics(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+
+        try {
+
+            const {DriverAnalytics} = await getAnalyticsModels();
+            const analytics = await DriverAnalytics.findOne({
+                driverId: userData._id
+            });
+
+            if (!analytics) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Analytics not found for this driver'
+                });
+            }
+
+            res.json({
+                success: true,
+                data: analytics
+            });
+
+        } catch (error) {
+            console.error('Verify delivery token error:', error);
+            return res.status(500).json({
+                error: "An error occurred while verifying delivery token"
+            });
+        }
+
+    }
+
+    // DriverController.js - Delivery Analytics Method
+
+    static async driverDeliveryAnalytics(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const driverId = userData._id;
+
+        try {
+            const {
+                month,
+                year,
+                limit = 100,
+                offset = 0,
+                status = 'all' // 'all', 'delivered', 'cancelled'
+            } = req.query;
+
+            const { Order } = await getOrderModels();
+            const { DriverAnalytics } = await getAnalyticsModels();
+
+            // Get analytics summary
+            const analytics = await DriverAnalytics.findOne({ driverId });
+
+            if (!analytics) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Analytics not found for this driver'
+                });
+            }
+
+            // Build query for deliveries
+            const query = {
+                'driverAssignment.driverId': new mongoose.Types.ObjectId(driverId)
+            };
+
+            // Filter by status if specified
+            if (status !== 'all') {
+                query.status = status;
+            }
+
+            // Filter by month/year if specified
+            if (month && year) {
+                const startDate = new Date(year, month - 1, 1);
+                const endDate = new Date(year, month, 0, 23, 59, 59, 999);
+                query.createdAt = { $gte: startDate, $lte: endDate };
+            } else {
+                // Default to current month if no filter specified
+                const now = new Date();
+                const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+                const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+                query.createdAt = { $gte: startOfMonth, $lte: endOfMonth };
+            }
+
+            // Get total count for pagination
+            const totalDeliveries = await Order.countDocuments(query);
+
+            // Get paginated deliveries
+            const deliveries = await Order.find(query)
+                .select({
+                    orderRef: 1,
+                    status: 1,
+                    pricing: 1,
+                    location: 1,
+                    package: 1,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    'driverAssignment.actualTimes': 1,
+                    'driverAssignment.distance': 1,
+                    'driverAssignment.duration': 1,
+                    'rating.clientRating': 1,
+                    pickupConfirmation: 1,
+                    deliveryConfirmation: 1,
+                    deliveryToken: 1,
+                    tokenVerified: 1
+                })
+                .sort({ createdAt: -1 })
+                .limit(parseInt(limit))
+                .skip(parseInt(offset))
+                .lean();
+
+            // Calculate summary stats for current filter
+            const summaryPipeline = [
+                { $match: query },
+                {
+                    $group: {
+                        _id: null,
+                        totalDeliveries: { $sum: 1 },
+                        totalEarnings: { $sum: '$pricing.totalAmount' },
+                        totalDistance: { $sum: '$driverAssignment.distance.total' },
+                        completedCount: {
+                            $sum: { $cond: [{ $eq: ['$status', 'delivered'] }, 1, 0] }
+                        },
+                        cancelledCount: {
+                            $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] }
+                        },
+                        avgEarnings: { $avg: '$pricing.totalAmount' },
+                        avgDistance: { $avg: '$driverAssignment.distance.total' },
+                        avgDuration: { $avg: '$driverAssignment.duration.actual' }
+                    }
+                }
+            ];
+
+            const summaryResult = await Order.aggregate(summaryPipeline);
+            const summary = summaryResult[0] || {
+                totalDeliveries: 0,
+                totalEarnings: 0,
+                totalDistance: 0,
+                completedCount: 0,
+                cancelledCount: 0,
+                avgEarnings: 0,
+                avgDistance: 0,
+                avgDuration: 0
+            };
+
+            // Get weekly data for chart (last 7 days)
+            const last7Days = Array.from({ length: 7 }, (_, i) => {
+                const date = new Date();
+                date.setDate(date.getDate() - (6 - i));
+                date.setHours(0, 0, 0, 0);
+                return date;
+            });
+
+            const weeklyData = await Promise.all(
+                last7Days.map(async (date) => {
+                    const nextDay = new Date(date);
+                    nextDay.setDate(date.getDate() + 1);
+
+                    const dayStats = await Order.aggregate([
+                        {
+                            $match: {
+                                'driverAssignment.driverId': new mongoose.Types.ObjectId(driverId),
+                                createdAt: { $gte: date, $lt: nextDay },
+                                status: 'delivered'
+                            }
+                        },
+                        {
+                            $group: {
+                                _id: null,
+                                deliveries: { $sum: 1 },
+                                earnings: { $sum: '$pricing.totalAmount' }
+                            }
+                        }
+                    ]);
+
+                    return {
+                        date: date.toISOString().split('T')[0],
+                        dayName: date.toLocaleDateString('en-US', { weekday: 'short' }),
+                        deliveries: dayStats[0]?.deliveries || 0,
+                        earnings: dayStats[0]?.earnings || 0
+                    };
+                })
+            );
+
+            // Get monthly data for current year
+            const currentYear = parseInt(year) || new Date().getFullYear();
+            const monthlyData = await Order.aggregate([
+                {
+                    $match: {
+                        'driverAssignment.driverId': new mongoose.Types.ObjectId(driverId),
+                        status: 'delivered',
+                        createdAt: {
+                            $gte: new Date(currentYear, 0, 1),
+                            $lte: new Date(currentYear, 11, 31, 23, 59, 59)
+                        }
+                    }
+                },
+                {
+                    $group: {
+                        _id: { $month: '$createdAt' },
+                        deliveries: { $sum: 1 },
+                        earnings: { $sum: '$pricing.totalAmount' }
+                    }
+                },
+                { $sort: { _id: 1 } }
+            ]);
+
+            const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            const monthlyChartData = monthNames.map((name, index) => {
+                const monthData = monthlyData.find(m => m._id === index + 1);
+                return {
+                    month: name,
+                    deliveries: monthData?.deliveries || 0,
+                    earnings: monthData?.earnings || 0
+                };
+            });
+
+            // Get available months/years for filtering
+            const availablePeriods = await Order.aggregate([
+                {
+                    $match: {
+                        'driverAssignment.driverId': new mongoose.Types.ObjectId(driverId)
+                    }
+                },
+                {
+                    $group: {
+                        _id: {
+                            year: { $year: '$createdAt' },
+                            month: { $month: '$createdAt' }
+                        },
+                        count: { $sum: 1 }
+                    }
+                },
+                { $sort: { '_id.year': -1, '_id.month': -1 } }
+            ]);
+
+            const periods = availablePeriods.map(p => ({
+                year: p._id.year,
+                month: p._id.month,
+                count: p.count,
+                label: `${monthNames[p._id.month - 1]} ${p._id.year}`
+            }));
+
+            // Format deliveries for frontend
+            const formattedDeliveries = deliveries.map(delivery => ({
+                id: delivery._id.toString(),
+                orderRef: delivery.orderRef,
+                status: delivery.status,
+                earnings: delivery.pricing?.totalAmount || 0,
+                distance: delivery.driverAssignment?.distance?.total || 0,
+                duration: delivery.driverAssignment?.duration?.actual || 0,
+                pickupLocation: {
+                    address: delivery.location?.pickUp?.address || '',
+                    landmark: delivery.location?.pickUp?.landmark || ''
+                },
+                dropoffLocation: {
+                    address: delivery.location?.dropOff?.address || '',
+                    landmark: delivery.location?.dropOff?.landmark || ''
+                },
+                packageCategory: delivery.package?.category || 'other',
+                packageDescription: delivery.package?.description || '',
+                rating: delivery.rating?.clientRating?.stars || null,
+                feedback: delivery.rating?.clientRating?.feedback || '',
+                createdAt: delivery.createdAt,
+                completedAt: delivery.driverAssignment?.actualTimes?.deliveredAt || delivery.updatedAt,
+                hasPickupPhotos: delivery.pickupConfirmation?.photos?.length > 0,
+                hasDeliveryPhotos: delivery.deliveryConfirmation?.photos?.length > 0,
+                tokenVerified: delivery.tokenVerified?.verified || false
+            }));
+
+            return res.status(200).json({
+                success: true,
+                data: {
+                    summary: {
+                        ...summary,
+                        completionRate: summary.totalDeliveries > 0
+                            ? ((summary.completedCount / summary.totalDeliveries) * 100).toFixed(1)
+                            : 0
+                    },
+                    charts: {
+                        weekly: weeklyData,
+                        monthly: monthlyChartData
+                    },
+                    deliveries: formattedDeliveries,
+                    pagination: {
+                        total: totalDeliveries,
+                        limit: parseInt(limit),
+                        offset: parseInt(offset),
+                        hasMore: parseInt(offset) + parseInt(limit) < totalDeliveries
+                    },
+                    filters: {
+                        availablePeriods: periods,
+                        currentMonth: month ? parseInt(month) : new Date().getMonth() + 1,
+                        currentYear: year ? parseInt(year) : new Date().getFullYear(),
+                        currentStatus: status
+                    },
+                    lifetimeStats: {
+                        totalDeliveries: analytics.lifetime.totalDeliveries,
+                        totalEarnings: analytics.lifetime.totalEarnings,
+                        totalDistance: analytics.lifetime.totalDistance,
+                        averageRating: analytics.lifetime.averageRating
+                    }
+                }
+            });
+
+        } catch (error) {
+            console.log("Driver delivery analytics error:", error);
+            return res.status(500).json({
+                success: false,
+                error: "An error occurred while fetching driver delivery analytics"
+            });
+        }
+    }
+
+    static async getSingleDelivery(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const driverId = userData._id;
+        const { orderId } = req.params;
+
+        try {
+            const { Order } = await getOrderModels();
+
+            // Find the order and verify it belongs to this driver
+            const delivery = await Order.findOne({
+                _id: orderId,
+                'driverAssignment.driverId': driverId
+            }).lean();
+
+            if (!delivery) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Delivery not found or does not belong to you'
+                });
+            }
+
+            return res.status(200).json({
+                success: true,
+                data: delivery
+            });
+
+        } catch (error) {
+            console.log("Get single delivery error:", error);
+            return res.status(500).json({
+                success: false,
+                error: "An error occurred while fetching delivery details"
+            });
+        }
+    }
+
+    static async migrateAnalytics(req, res){
+        try {
+            const {
+                batchSize = 50,
+                driverLimit = null,
+                skipExisting = true
+            } = req.body;
+
+            console.log('📊 Migration requested with options:', { batchSize, driverLimit, skipExisting });
+
+            const migration = new AnalyticsMigration();
+            const result = await migration.migrate({
+                batchSize,
+                driverLimit,
+                skipExisting
+            });
+
+            res.json({
+                success: true,
+                message: 'Migration completed successfully',
+                data: result
+            });
+
+        } catch (error) {
+            console.error('Migration error:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Migration failed',
+                error: error.message
+            });
+        }
     }
 
 }

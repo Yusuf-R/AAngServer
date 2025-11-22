@@ -1,6 +1,8 @@
 // /models/Orders/Order.js
 import mongoose from "mongoose";
 import dbClient from "../database/mongoDB";
+import analyticsUpdater, { orderAnalyticsMiddleware, ratingAnalyticsMiddleware } from '../utils/analyticsUpdater.js';
+
 
 const {Schema, model} = mongoose;
 
@@ -534,6 +536,32 @@ OrderSchema.pre('save', function (next) {
     }
     next();
 });
+
+OrderSchema.post('save', async function(doc) {
+    // Update analytics when order is completed
+    if (doc.status === 'delivered' && doc.isModified('status')) {
+        await orderAnalyticsMiddleware(doc);
+    }
+
+    // Update analytics when rating is added
+    if (doc.rating?.clientRating?.stars && doc.isModified('rating.clientRating')) {
+        await ratingAnalyticsMiddleware(doc);
+    }
+});
+
+// Add post-findOneAndUpdate middleware
+OrderSchema.post('findOneAndUpdate', async function(doc) {
+    if (doc) {
+        if (doc.status === 'delivered') {
+            await orderAnalyticsMiddleware(doc);
+        }
+
+        if (doc.rating?.clientRating?.stars) {
+            await ratingAnalyticsMiddleware(doc);
+        }
+    }
+});
+
 
 // Static methods
 OrderSchema.statics.findActiveOrders = function () {

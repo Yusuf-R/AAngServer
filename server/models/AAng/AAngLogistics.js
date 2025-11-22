@@ -1,6 +1,7 @@
 // /models/AAng/AAngLogistics.js
 import mongoose from "mongoose";
 import dbClient from "../../database/mongoDB";
+import analyticsUpdater, { orderAnalyticsMiddleware, ratingAnalyticsMiddleware } from '../../utils/analyticsUpdater.js';
 
 const {Schema, model} = mongoose;
 
@@ -122,7 +123,28 @@ const ClientSchema = new Schema({
         balance: {type: Number, default: 0},
         totalSpent: {type: Number, default: 0},
         lifetimeValue: {type: Number, default: 0},
-        lastTransactionDate: Date
+        lastTransactionDate: Date,
+
+        // Banking Details
+        bankDetails: {
+            accountName: String,
+            accountNumber: String,
+            bankName: String,
+            bankCode: String,
+            verified: {type: Boolean, default: false},
+            verificationDate: Date,
+            verifiedBy: {type: Schema.Types.ObjectId, ref: 'Admin'}
+        },
+
+        // Transaction History (last 50)
+        recentTransactions: [{
+            type: {type: String, enum: ['earning', 'payment', 'bonus', 'penalty', 'refund']},
+            amount: Number,
+            description: String,
+            orderId: {type: Schema.Types.ObjectId, ref: 'Order'},
+            timestamp: {type: Date, default: Date.now},
+            reference: String
+        }]
     },
 
     // Usage Statistics
@@ -1263,6 +1285,27 @@ AdminSchema.pre('save', function(next) {
     }
 
     next();
+});
+
+// Post-save middleware for driver analytics
+DriverSchema.post('save', async function(doc) {
+    // Initialize analytics for new driver
+    if (this.isNew) {
+        try {
+            await analyticsUpdater.initializeDriverAnalytics(doc._id, {
+                createdAt: doc.createdAt,
+                vehicleType: doc.vehicleDetails?.type
+            });
+            console.log(`Analytics initialized for new driver: ${doc._id}`);
+        } catch (error) {
+            console.error('Error initializing driver analytics:', error);
+        }
+    }
+
+    // Update status when driver goes online/offline
+    if (doc.isModified('availabilityStatus')) {
+        await analyticsUpdater.updateDriverStatus(doc._id, doc.availabilityStatus);
+    }
 });
 
 // Static methods for common operations
