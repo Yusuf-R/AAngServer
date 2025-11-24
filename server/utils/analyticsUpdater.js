@@ -58,7 +58,7 @@ class AnalyticsUpdater {
             // Prepare order data for analytics
             const orderData = {
                 orderId: order._id,
-                earnings: order.pricing?.totalAmount || 0,
+                earnings: order.payment?.financialBreakdown.driverShare || 0,
                 distance: order.driverAssignment.distance?.total || 0,
                 duration: order.driverAssignment.duration?.actual || 0,
                 status: order.status,

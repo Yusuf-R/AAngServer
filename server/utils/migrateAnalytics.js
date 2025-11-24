@@ -147,6 +147,9 @@ class AnalyticsMigration {
             // Check achievements
             await this.checkAchievements(analytics);
 
+            // Process withdrawals AFTER processing orders
+            await this.processWithdrawals(analytics, driver._id);
+
             // Save analytics
             await analytics.save();
 
@@ -240,7 +243,7 @@ class AnalyticsMigration {
         const yearKey = orderDate.getFullYear().toString();
 
         // Extract order data
-        const earnings = order.pricing?.totalAmount || 0;
+        const earnings = order.payment.financialBreakdown?.driverShare || 0;
         const distance = order.driverAssignment?.distance?.total || 0;
         const duration = order.driverAssignment?.duration?.actual || 0;
         const isOnTime = this.checkIfOnTime(order);
@@ -380,7 +383,7 @@ class AnalyticsMigration {
         const zone = order.location.dropOff.locationType || 'other';
         const state = order.location.dropOff.state || 'Unknown';
         const lga = order.location.dropOff.lga || 'Unknown';
-        const earnings = order.pricing?.totalAmount || 0;
+        const earnings = order.payment?.financialBreakdown.driverShare || 0;
 
         // Find or create area
         let area = analytics.geographic.topAreas.find(
@@ -624,6 +627,65 @@ class AnalyticsMigration {
 
         return new Date(order.driverAssignment.actualTimes.deliveredAt) <=
             new Date(order.deliveryWindow.end);
+    }
+
+    async processWithdrawals(analytics, driverId) {
+        try {
+            const { FinancialTransaction } = await getFinancialModels();
+
+            // Get all driver payouts from financial transactions
+            const withdrawals = await FinancialTransaction.find({
+                driverId: driverId,
+                transactionType: 'driver_payout',
+                status: 'completed'
+            }).sort({ createdAt: 1 });
+
+            let totalWithdrawn = 0;
+            let totalFees = 0;
+
+            // Process each withdrawal
+            for (const withdrawal of withdrawals) {
+                const withdrawalDate = new Date(withdrawal.createdAt);
+                const dateKey = withdrawalDate.toISOString().split('T')[0];
+                const weekKey = this.getWeekKey(withdrawalDate);
+                const monthKey = withdrawalDate.toISOString().substring(0, 7);
+                const yearKey = withdrawalDate.getFullYear().toString();
+
+                const amount = withdrawal.amount.gross;
+                const fees = withdrawal.amount.fees;
+
+                // Update lifetime totals
+                totalWithdrawn += amount;
+                totalFees += fees;
+
+                // Update time-based metrics
+                this.updateWithdrawalMetrics(analytics.daily, dateKey, amount, fees);
+                this.updateWithdrawalMetrics(analytics.weekly, weekKey, amount, fees);
+                this.updateWithdrawalMetrics(analytics.monthly, monthKey, amount, fees);
+                this.updateWithdrawalMetrics(analytics.yearly, yearKey, amount, fees);
+            }
+
+            // Update lifetime analytics
+            analytics.lifetime.totalWithdrawn = totalWithdrawn;
+            analytics.lifetime.totalFees = totalFees;
+
+            if (withdrawals.length > 0) {
+                analytics.lifetime.lastWithdrawalDate = withdrawals[withdrawals.length - 1].createdAt;
+            }
+
+        } catch (error) {
+            console.error(`Error processing withdrawals for driver ${driverId}:`, error);
+        }
+    }
+
+// Helper method to update withdrawal metrics
+    updateWithdrawalMetrics(metricsArray, periodKey, amount, fees) {
+        let metric = metricsArray.find(m => m.period === periodKey);
+
+        if (metric) {
+            metric.earnings.withdrawn = (metric.earnings.withdrawn || 0) + amount;
+            metric.earnings.fees = (metric.earnings.fees || 0) + fees;
+        }
     }
 }
 

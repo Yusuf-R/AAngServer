@@ -7,6 +7,7 @@ import axios from "axios";
 import crypto from 'crypto';
 import NotificationService from "../services/NotificationService";
 import Notification from "../models/Notification";
+import FinancialService from "../services/FinancialService";
 
 const secret = process.env.PAYSTACK_SECRET_KEY;
 const url = process.env.PAYSTACK_URL;
@@ -548,7 +549,10 @@ class OrderController {
             }
 
             // Update orderData with BE-verified pricing and insurance
-            orderData.pricing = backendPricing.backendPricing;
+            orderData.pricing = {
+                ...backendPricing.backendPricing,
+                pricingBreakdown: backendPricing.backendPricing.pricingBreakdown
+            };
             orderData.insurance = {
                 ...frontendInsurance,
                 verified: true,
@@ -930,7 +934,6 @@ class OrderController {
         try {
             const {Order} = await getOrderModels();
 
-
             const order = await Order.findOne({
                 _id: orderId,
                 'payment.reference': reference
@@ -957,23 +960,53 @@ class OrderController {
                         return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reason=amount_mismatch`);
                     }
 
+                    let financialRecordsCreated = false;
+
+                    // Check if financial records already exist
+                    const existingPaymentTxn = order.pricing?.financialReferences?.paymentTransactionId;
+
+                    if (!existingPaymentTxn) {
+                        try {
+                            await FinancialService.processOrderPayment({
+                                orderId: order._id,
+                                clientId: order.clientId,
+                                grossAmount: paidAmount,
+                                paystackFee: (verificationData.fees || 0) / 100,
+                                paystackRef: reference,
+                                walletUsed: order.pricing?.wallet?.amount || 0,
+                                metadata: {
+                                    walletBalanceBefore: order.pricing?.wallet?.balanceBefore || 0,
+                                    callback: true,
+                                    verificationData: verificationData
+                                }
+                            });
+                            financialRecordsCreated = true;
+                            console.log('✅ Financial records created for order:', order._id);
+                        } catch (financialError) {
+                            console.error('❌ Financial recording failed:', financialError);
+                            // Continue anyway - we'll retry in webhook/cron job
+                        }
+                    }
+
                     // Update order if not already updated
-                    await Order.findOneAndUpdate(
+                    const updateResult = await Order.findOneAndUpdate(
                         {
                             _id: orderId,
                             'payment.reference': reference,
-                            'payment.status': {$ne: PAYMENT_STATUS.PAID}
+                            'payment.status': {$ne: PAYMENT_STATUS.PAID} // Prevent duplicate updates
                         },
                         {
                             $set: {
                                 'payment.status': PAYMENT_STATUS.PAID,
                                 'payment.paidAt': new Date(),
                                 'payment.paystackData': verificationData,
-                                'status': ORDER_STATUS.SUBMITTED,
+                                'status': ORDER_STATUS.SUBMITTED, // Consistent status
                                 'metadata.draftProgress.step': 4,
                                 'metadata.draftProgress.fieldCompletion.payment': true,
                                 'metadata.draftProgress.completedAt': new Date(),
-                                'metadata.draftProgress.lastUpdated': new Date()
+                                'metadata.draftProgress.lastUpdated': new Date(),
+                                // Store financial record creation status
+                                'payment.financialRecordsCreated': financialRecordsCreated
                             },
                             $addToSet: {
                                 'metadata.draftProgress.completedSteps': 4
@@ -991,6 +1024,15 @@ class OrderController {
                                 orderTrackingHistory: {
                                     $each: [
                                         {
+                                            status: 'payment_completed',
+                                            timestamp: new Date(),
+                                            title: 'Payment Completed',
+                                            description: 'Your payment was successful. Order is now submitted for processing.',
+                                            icon: "✅",
+                                            isCompleted: true,
+                                            isCurrent: false,
+                                        },
+                                        {
                                             status: 'order_submitted',
                                             timestamp: new Date(),
                                             title: 'Order Submitted',
@@ -998,77 +1040,76 @@ class OrderController {
                                             icon: "📤",
                                             isCompleted: false,
                                             isCurrent: true,
-                                        },
-                                        {
-                                            status: 'payment_completed',
-                                            timestamp: new Date(),
-                                            title: 'Payment Completed',
-                                            description: 'Your payment was successful via callback. Order is now submitted for processing.',
-                                            icon: "✅",
-                                            isCompleted: true,
-                                            isCurrent: false,
-                                        },
-
+                                        }
                                     ]
                                 }
                             }
                         },
-                        {
-                            new: true,
-                        }
+                        {new: true}
                     );
-                    // send notification if not existing
-                    const [existingOrderNotification, existingPaymentNotification] = await Promise.all([
-                        Notification.findOne({
-                            userId: order.clientId,
-                            category: 'ORDER',
-                            type: 'order.created',
-                            'metadata.orderId': order._id,
-                            'metadata.orderRef': order.orderRef
-                        }).lean(),
 
-                        Notification.findOne({
-                            userId: order.clientId,
-                            category: 'PAYMENT',
-                            type: 'payment.successful',
-                            'metadata.orderId': order._id,
-                            'metadata.gateway': 'PayStack'
-                        }).lean()
-                    ]);
+                    // Only send notifications if order was actually updated
+                    if (updateResult) {
+                        // **FIX 4: Use Promise.all for efficient notification checks**
+                        const [existingOrderNotification, existingPaymentNotification] = await Promise.all([
+                            Notification.findOne({
+                                userId: order.clientId,
+                                category: 'ORDER',
+                                type: 'order.created',
+                                'metadata.orderId': order._id
+                            }).lean(),
+                            Notification.findOne({
+                                userId: order.clientId,
+                                category: 'PAYMENT',
+                                type: 'payment.successful',
+                                'metadata.orderId': order._id
+                            }).lean()
+                        ]);
 
-                    // Create notifications only if they don't exist
-                    if (!existingOrderNotification) {
-                        await NotificationService.createNotification({
-                            userId: order.clientId,
-                            type: 'order.created',
-                            templateData: {
-                                orderId: order.orderRef
-                            },
-                            metadata: {
-                                orderId: order._id,
-                                orderRef: order.orderRef,
-                            }
-                        });
+                        // Create notifications only if they don't exist
+                        const notificationPromises = [];
+
+                        if (!existingOrderNotification) {
+                            notificationPromises.push(
+                                NotificationService.createNotification({
+                                    userId: order.clientId,
+                                    type: 'order.created',
+                                    templateData: {orderId: order.orderRef},
+                                    metadata: {
+                                        orderId: order._id,
+                                        orderRef: order.orderRef,
+                                    }
+                                })
+                            );
+                        }
+
+                        if (!existingPaymentNotification) {
+                            notificationPromises.push(
+                                NotificationService.createNotification({
+                                    userId: order.clientId,
+                                    type: 'payment.successful',
+                                    templateData: {
+                                        amount: verificationData.amount,
+                                        orderId: order.orderRef
+                                    },
+                                    metadata: {
+                                        orderId: order._id,
+                                        orderRef: order.orderRef,
+                                        paymentData: verificationData,
+                                        gateway: 'PayStack'
+                                    }
+                                })
+                            );
+                        }
+
+                        // Send all notifications concurrently
+                        if (notificationPromises.length > 0) {
+                            await Promise.all(notificationPromises);
+                        }
+
+                        console.log('✅ Payment successful via callback:', reference);
                     }
 
-                    if (!existingPaymentNotification) {
-                        await NotificationService.createNotification({
-                            userId: order.clientId,
-                            type: 'payment.successful',
-                            templateData: {
-                                amount: verificationData.amount,
-                                orderId: order.orderRef
-                            },
-                            metadata: {
-                                orderId: order._id,
-                                orderRef: order.orderRef,
-                                paymentData: verificationData,
-                                gateway: 'PayStack'
-                            }
-                        });
-                    }
-
-                    console.log('✅ Payment successful via callback:', reference);
                     return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reference=${reference}`);
 
                 } else {
@@ -1088,16 +1129,15 @@ class OrderController {
                             }
                         }
                     );
+
+                    // Send failure notification
                     const paymentNotification = await Notification.findOne({
                         userId: order.clientId,
                         category: 'PAYMENT',
                         type: 'payment.failed',
-                        metadata: {
-                            orderId: order._id,
-                            orderRef: order.orderRef,
-                            gateway: 'PayStack',
-                        }
+                        'metadata.orderId': order._id
                     });
+
                     if (!paymentNotification) {
                         await NotificationService.createNotification({
                             userId: order.clientId,
@@ -1116,13 +1156,12 @@ class OrderController {
                             }
                         });
                     }
+
                     return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reason=${encodeURIComponent(verificationData.gateway_response || 'payment_failed')}`);
                 }
 
-            } catch
-                (verificationError) {
+            } catch (verificationError) {
                 console.log('Payment verification failed in callback:', verificationError);
-                // Send a notification to the user about verification failure
                 return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reason=verification_failed`);
             }
 
@@ -1530,6 +1569,29 @@ class OrderController {
                     reference
                 });
                 return;
+            }
+
+            const existingPaymentTxn = order.pricing?.financialReferences?.paymentTransactionId;
+
+            if (!existingPaymentTxn) {
+                try {
+                    await FinancialService.processOrderPayment({
+                        orderId: order._id,
+                        clientId: order.clientId,
+                        grossAmount: paidAmount,
+                        paystackFee: (data.fees || 0) / 100,
+                        paystackRef: reference,
+                        walletUsed: order.pricing?.wallet?.amount || 0,
+                        metadata: {
+                            walletBalanceBefore: order.pricing?.wallet?.balanceBefore || 0,
+                            webhook: true,
+                            webhookData: data
+                        }
+                    });
+                    console.log('✅ Financial records created via webhook:', order._id);
+                } catch (financialError) {
+                    console.error('❌ Financial recording failed in webhook:', financialError);
+                }
             }
 
             // Update order

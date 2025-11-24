@@ -460,6 +460,91 @@ export function calculateTotalPrice(orderData = {}) {
         ...locationSurcharges.surcharges
     ];
 
+    const pricingBreakdown = {
+        baseCalculation: {
+            vehicleType,
+            distance: parseFloat(distance.toFixed(1)),
+            baseFare: baseFareCalc.baseFare,
+            distanceRate: PRICING_CONFIG.distanceRates[vehicleType],
+            distanceFare: baseFareCalc.distanceFare,
+            totalBase: baseFareCalc.total
+        },
+
+        weightCalculation: {
+            packageWeight,
+            freeLimit: PRICING_CONFIG.weightPricing.freeWeightLimits[vehicleType],
+            excessWeight: weightCalc.excessWeight,
+            excessRate: PRICING_CONFIG.weightPricing.excessRates[vehicleType],
+            surcharge: weightCalc.surcharge
+        },
+
+        priorityCalculation: {
+            level: priority,
+            multiplier: priorityCalc.multiplier,
+            adjustment: priorityCalc.adjustment,
+            adjustedTotal: priorityCalc.newTotal
+        },
+
+        surchargesBreakdown: {
+            packageSurcharges: packageSurcharges.surcharges,
+            locationSurcharges: locationSurcharges.surcharges,
+            totalSurcharges: packageSurcharges.totalSurcharge + locationSurcharges.totalSurcharge
+        },
+
+        insuranceCalculation: {
+            isInsured: insuranceData.isInsured,
+            declaredValue: insuranceData.declaredValue || 0,
+            rate: insuranceCalc.rate,
+            premium: insuranceCalc.premium,
+            isHighValue: insuranceCalc.isHighValue
+        },
+
+        discountCalculation: {
+            code: discountCalc.code,
+            type: discountCalc.code ? 'percentage' : 'none',
+            value: discountCalc.discount > 0 ? (discountCalc.discount / subtotal * 100) : 0,
+            amount: discountCalc.discount,
+            reason: discountCalc.reason
+        },
+
+        taxCalculation: {
+            taxableAmount,
+            vatRate: PRICING_CONFIG.tax.vatRate,
+            vatAmount: vatCalc.vat
+        },
+
+        paymentFees: {
+            customerAmount: paystackCalc.finalCustomerAmount,
+            processingFee: paystackCalc.processingFee,
+            netAmount: deliveryTotal,
+            effectiveFlatFee: paystackCalc.effectiveFlatFee,
+            feeBreakdown: `1.5% + ₦${paystackCalc.effectiveFlatFee}`
+        },
+
+        revenueDistribution: {
+            deliveryTotal: Math.round(deliveryTotal),
+            driverShare: Math.round(deliveryTotal * 0.7),
+            platformShare: Math.round(deliveryTotal * 0.3),
+            driverPercentage: 70,
+            platformPercentage: 30
+        },
+
+        finalSummary: {
+            subtotal,
+            totalDiscount: discountCalc.discount,
+            taxableAmount,
+            totalTax: vatCalc.vat,
+            deliveryTotal: Math.round(deliveryTotal),
+            customerAmount: paystackCalc.finalCustomerAmount,
+            processingFees: paystackCalc.processingFee,
+            netReceived: Math.round(deliveryTotal)
+        },
+
+        calculatedAt: new Date(),
+        pricingEngineVersion: '2.0',
+        calculationId: `CALC_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    };
+
     return {
         // Frontend display values
         displayBreakdown: {
@@ -485,6 +570,9 @@ export function calculateTotalPrice(orderData = {}) {
                 code: discountCalc.code,
                 reason: discountCalc.reason
             } : undefined,
+
+            pricingBreakdown,
+
             // CRITICAL: Financial breakdown
             financialBreakdown: {
                 deliveryTotal: Math.round(deliveryTotal),
@@ -496,7 +584,8 @@ export function calculateTotalPrice(orderData = {}) {
                 driverEarnings: Math.round(deliveryTotal * 0.7),
                 platformRevenue: Math.round(deliveryTotal * 0.3),
 
-                currency: 'NGN'
+                currency: 'NGN',
+                pricingBreakdownId: pricingBreakdown.calculationId
             },
 
             totalAmount: paystackCalc.finalCustomerAmount, // Charge this to customer

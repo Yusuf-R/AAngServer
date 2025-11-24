@@ -9,6 +9,8 @@ import AnalyticsMigration from '../utils/migrateAnalytics.js';
 import MailClient from "../utils/mailer";
 import NotificationService from "../services/NotificationService";
 import Notification from '../models/Notification';
+import getFinancialModels from '../models/Finance/FinancialTransactions';
+import FinancialService from "../services/FinancialService";
 
 const DELIVERY_STAGES = {
     DISCOVERING: 'discovering',
@@ -177,7 +179,7 @@ class DriverController {
                 .sort({'driverAssignment.actualTimes.deliveredAt': -1})
                 .limit(10)
                 .populate('clientId', 'fullName phoneNumber')
-                .select('orderRef status pricing package location driverAssignment rating createdAt')
+                .select('orderRef status payment package location driverAssignment rating createdAt')
                 .lean();
 
             // Get pending order assignments
@@ -233,6 +235,10 @@ class DriverController {
 
             profileCompletion = Math.round((completionChecks / 9) * 100);
         }
+
+        console.log({
+            it: user.wallet.recentTransactions,
+        })
 
         // Enhanced dashboard data structure
         return {
@@ -376,7 +382,7 @@ class DriverController {
                     clientName: order.clientId?.fullName,
                     pickupLocation: order.location?.pickUp?.address,
                     dropoffLocation: order.location?.dropOff?.address,
-                    earnings: order.pricing?.totalAmount || 0,
+                    earnings: order.payment?.financialBreakdown?.driverShare || 100,
                     completedAt: order.driverAssignment?.actualTimes?.deliveredAt,
                     rating: order.rating?.clientRating?.stars,
                     clientFeedback: order.rating?.clientRating?.feedback
@@ -1917,7 +1923,6 @@ class DriverController {
         }
     }
 
-
     /**
      * Haversine formula to calculate distance between two coordinates
      * Returns distance in kilometers
@@ -2086,6 +2091,7 @@ class DriverController {
                     'package.weight',
                     'package.isFragile',
                     'pricing.totalAmount',
+                    'payment.financialBreakdown.driverShare',
                     'pricing.currency',
                     'createdAt',
                     'scheduledPickup'
@@ -2711,21 +2717,18 @@ class DriverController {
             });
         }
 
-        // Validate token
         if (!verificationData.tokenVerified || !verificationData.deliveryToken) {
             return res.status(400).json({
                 error: "Delivery token must be verified"
             });
         }
 
-        // Validate recipient
         if (!verificationData.recipientName?.trim()) {
             return res.status(400).json({
                 error: "Recipient name is required"
             });
         }
 
-        // Validate photos (minimum 2)
         if (!verificationData.photos || verificationData.photos.length < 2) {
             return res.status(400).json({
                 error: "At least 2 delivery photos are required"
@@ -2736,7 +2739,6 @@ class DriverController {
             const {Order} = await getOrderModels();
             const {Driver, Client} = await getModels();
             const driver = await Driver.findById(userData._id);
-
 
             // ============================================
             // 2. FETCH & VERIFY ORDER
@@ -2769,8 +2771,16 @@ class DriverController {
                     error: "Invalid delivery token"
                 });
             }
-            const client = await Client.findById(order.clientId);
 
+            // **CRITICAL CHECK: Ensure payment was completed**
+            if (order.payment?.status !== 'paid') {
+                return res.status(400).json({
+                    error: "Order payment is not completed. Cannot complete delivery.",
+                    details: `Payment status: ${order.payment?.status || 'unknown'}`
+                });
+            }
+
+            const client = await Client.findById(order.clientId);
             const now = new Date();
 
             // ============================================
@@ -2800,15 +2810,36 @@ class DriverController {
             };
 
             // ============================================
-            // 4. CALCULATE EARNINGS
+            // 4. CALCULATE EARNINGS (FROM PRICING BREAKDOWN)
             // ============================================
 
-            const baseEarnings = order.pricing.totalAmount * 0.7; // 70% to driver
+            // **FIX 1: Get earnings from pricing breakdown, not recalculating**
+            const revenueDistribution = order.pricing?.pricingBreakdown?.revenueDistribution;
+
+            if (!revenueDistribution) {
+                return res.status(500).json({
+                    error: "Order pricing breakdown not found. Cannot process delivery.",
+                    details: "Financial data is missing from order"
+                });
+            }
+
+            const baseEarnings = revenueDistribution.driverShare;
             const penalty = order.metadata?.penalty?.amount || 0;
             const finalEarnings = Math.max(0, baseEarnings - penalty);
 
+            console.log('💰 Driver Earnings Calculation:', {
+                orderId: order._id,
+                orderRef: order.orderRef,
+                driverId: userData._id,
+                baseEarnings,
+                penalty,
+                finalEarnings,
+                deliveryTotal: revenueDistribution.deliveryTotal,
+                platformShare: revenueDistribution.platformShare
+            });
+
             // ============================================
-            // 5. UPDATE ORDER
+            // 5. UPDATE ORDER STATUS & CONFIRMATION
             // ============================================
 
             order.status = 'delivered';
@@ -2926,16 +2957,57 @@ class DriverController {
             });
 
             // ============================================
-            // 8. SAVE ORDER
+            // 8. SAVE ORDER FIRST (Before Financial Processing)
             // ============================================
 
             await order.save();
+            console.log('✅ Order updated to delivered status:', order.orderRef);
 
             // ============================================
-            // 9. UPDATE DRIVER STATS & WALLET
+            // 9. PROCESS FINANCIAL DISTRIBUTION
             // ============================================
 
-            await Driver.findByIdAndUpdate(
+            let financialResult = null;
+            let financialError = null;
+
+            try {
+                // **FIX 2: Use FinancialService to distribute revenue**
+                financialResult = await FinancialService.distributeOrderRevenue(orderId);
+
+                console.log('✅ Revenue distributed successfully:', {
+                    orderId: order._id,
+                    orderRef: order.orderRef,
+                    distribution: financialResult.distribution,
+                    transactions: financialResult.transactions
+                });
+
+            } catch (error) {
+                console.log('❌ Financial distribution failed:', error);
+                financialError = error;
+
+                // **CRITICAL: Don't fail the delivery, but log for manual intervention**
+                // The order is delivered, we just need to retry financial processing
+                console.log('⚠️ ALERT: Manual financial processing required for order:', {
+                    orderId: order._id,
+                    orderRef: order.orderRef,
+                    driverId: userData._id,
+                    error: error.message
+                });
+
+                // TODO: Send alert to admin
+                // await AdminAlertService.sendFinancialProcessingAlert({
+                //     orderId: order._id,
+                //     orderRef: order.orderRef,
+                //     error: error.message
+                // });
+            }
+
+            // ============================================
+            // 10. UPDATE DRIVER STATS (Performance Only)
+            // ============================================
+
+            // **FIX 3: Don't update wallet here - FinancialService handles it**
+            const driverUpdateResult = await Driver.findByIdAndUpdate(
                 userData._id,
                 {
                     $set: {
@@ -2948,15 +3020,14 @@ class DriverController {
                         'performance.monthlyStats.deliveries': 1,
                         'performance.weeklyStats.earnings': finalEarnings,
                         'performance.monthlyStats.earnings': finalEarnings,
-                        'wallet.balance': finalEarnings,
-                        'wallet.totalEarnings': finalEarnings
+
                     },
                     $push: {
                         'wallet.recentTransactions': {
                             $each: [{
                                 type: 'earning',
                                 amount: finalEarnings,
-                                description: `Delivery completed: ${order.orderRef}`,
+                                description: `Delivery completed: ${baseEarnings}`,
                                 orderId: order._id,
                                 timestamp: now,
                                 reference: order.orderRef
@@ -2964,10 +3035,19 @@ class DriverController {
                             $position: 0,
                         }
                     }
-                }
+                },
+                {new: true}
             );
 
-            // Send Notifications
+            console.log('✅ Driver performance stats updated:', {
+                driverId: userData._id,
+                totalDeliveries: driverUpdateResult.performance.totalDeliveries
+            });
+
+            // ============================================
+            // 11. SEND NOTIFICATIONS
+            // ============================================
+
             try {
                 // Notify CLIENT - Delivery completed
                 await NotificationService.createNotification({
@@ -3003,7 +3083,7 @@ class DriverController {
                     priority: 'HIGH'
                 });
 
-                // 2. Notify DRIVER - Delivery completed with earnings
+                // Notify DRIVER - Delivery completed with earnings
                 await NotificationService.createNotification({
                     userId: userData._id,
                     type: 'driver.delivery_completed',
@@ -3012,53 +3092,55 @@ class DriverController {
                         orderId: order._id.toString(),
                         clientId: order.clientId.toString(),
                         earnings: finalEarnings.toFixed(2),
-                        totalDeliveries: (await Driver.findById(userData._id))?.performance?.totalDeliveries || 0,
+                        totalDeliveries: driverUpdateResult?.performance?.totalDeliveries || 0,
                         deliveryDuration: order.driverAssignment.duration?.actual || 0
                     },
                     metadata: {
                         orderId: order._id,
                         orderRef: order.orderRef,
                         earnings: finalEarnings,
-                        requiresRating: true
+                        requiresRating: true,
+                        financialProcessed: !!financialResult
                     },
                     priority: 'HIGH'
                 });
 
-                // 3. Schedule rating reminders (10 minutes after delivery)
-                const reminderTime = new Date(now.getTime() + 10 * 60 * 1000); // 10 mins
+                // Schedule rating reminders (10 minutes after delivery)
+                const reminderTime = new Date(now.getTime() + 10 * 60 * 1000);
 
-                // Client rating reminder
-                await NotificationService.createNotification({
-                    userId: order.clientId,
-                    type: 'client.rating_reminder',
-                    templateData: {
-                        orderRef: order.orderRef,
-                        orderId: order._id.toString(),
-                        driverName: userData.fullName || userData.name
-                    },
-                    scheduleFor: reminderTime,
-                    priority: 'LOW'
-                });
+                await Promise.all([
+                    // Client rating reminder
+                    NotificationService.createNotification({
+                        userId: order.clientId,
+                        type: 'client.rating_reminder',
+                        templateData: {
+                            orderRef: order.orderRef,
+                            orderId: order._id.toString(),
+                            driverName: userData.fullName || userData.name
+                        },
+                        scheduleFor: reminderTime,
+                        priority: 'LOW'
+                    }),
 
-                // Driver rating reminder
-                await NotificationService.createNotification({
-                    userId: userData._id,
-                    type: 'driver.rating_reminder',
-                    templateData: {
-                        orderRef: order.orderRef,
-                        orderId: order._id.toString()
-                    },
-                    scheduleFor: reminderTime,
-                    priority: 'LOW'
-                });
+                    // Driver rating reminder
+                    NotificationService.createNotification({
+                        userId: userData._id,
+                        type: 'driver.rating_reminder',
+                        templateData: {
+                            orderRef: order.orderRef,
+                            orderId: order._id.toString()
+                        },
+                        scheduleFor: reminderTime,
+                        priority: 'LOW'
+                    })
+                ]);
 
-                // 4. Check for milestones
-
-                const totalDeliveries = driver?.performance?.totalDeliveries || 0;
+                // Check for delivery milestones
+                const totalDeliveries = driverUpdateResult?.performance?.totalDeliveries || 0;
                 const milestones = [10, 25, 50, 100, 250, 500, 1000];
 
                 if (milestones.includes(totalDeliveries)) {
-                    const bonusAmount = totalDeliveries * 10; // Example: ₦10 per delivery milestone
+                    const bonusAmount = totalDeliveries * 10;
 
                     await NotificationService.createNotification({
                         userId: userData._id,
@@ -3073,86 +3155,56 @@ class DriverController {
                     });
                 }
 
-                // 5. Notify admin (optional - for monitoring)
-                // const admins = await NotificationService.getAdminUsers();
-                // for (const admin of admins.slice(0, 2)) { // Only notify 2 admins
-                //     await NotificationService.createNotification({
-                //         userId: admin._id,
-                //         type: 'admin.delivery_completed',
-                //         templateData: {
-                //             orderRef: order.orderRef,
-                //             orderId: order._id.toString(),
-                //             driverName: userData.fullName || userData.name,
-                //             driverId: userData._id.toString(),
-                //             clientName: client.fullName || 'Client',
-                //             deliveryDuration: (order.driverAssignment.duration?.actual || 0).toString(),
-                //             earnings: finalEarnings.toFixed(2),
-                //             penalties: penalty.toFixed(2),
-                //             rating: 'Pending'
-                //         },
-                //         priority: 'NORMAL'
-                //     });
-                // }
-
-                // 6. TODO: Send SMS to client
-                // await SMSService.send({
-                //     to: order.location.dropOff.contactPerson?.phone,
-                //     message: `Your order ${order.orderRef} has been delivered. Rate your experience: [link]`
-                // });
-
             } catch (notificationError) {
                 console.log('❌ Notification error:', notificationError);
                 // Don't fail the request if notifications fail
             }
 
-            // send a non blocking mail
+            // ============================================
+            // 12. SEND EMAIL NOTIFICATIONS
+            // ============================================
+
             try {
-                // 7. TODO: Send email receipt to client
-                await MailClient.deliverySuccessClient(client?.email, order.orderRef, order.driverAssignment.duration?.actual, order.driverAssignment?.driverInfo.name);
+                await Promise.all([
+                    MailClient.deliverySuccessClient(
+                        client?.email,
+                        order.orderRef,
+                        order.driverAssignment.duration?.actual,
+                        order.driverAssignment?.driverInfo.name
+                    ),
+                    MailClient.deliverySuccessDriver(
+                        order.driverAssignment?.driverInfo.email,
+                        order.orderRef,
+                        order.driverAssignment.duration?.actual,
+                        client.fullName
+                    )
+                ]);
             } catch (err) {
-                console.log(err.message)
+                console.log('❌ Email notification error:', err.message);
             }
-            try {
-                // 7. TODO: Send email receipt to driver
-                await MailClient.deliverySuccessDriver(order.driverAssignment?.driverInfo.email, order.orderRef, order.driverAssignment.duration?.actual, client.fullName);
-            } catch (err) {
-                console.log(err.message)
-            }
+
+            // ============================================
+            // 13. GET UPDATED DASHBOARD DATA
+            // ============================================
 
             const dashboardData = await DriverController.userDashBoardData(userData);
             if (!dashboardData) {
                 return res.status(404).json({error: "Dashboard data not found"});
             }
 
+            // ============================================
+            // 14. BUILD RESPONSE
+            // ============================================
+
             const response = {
                 success: true,
                 message: "🎉 Delivery completed successfully!",
                 userData: dashboardData,
-                order: {
-                    _id: order._id,
-                    orderRef: order.orderRef,
-                    status: order.status,
-                    deliveredAt: now,
-                    deliveryDuration: order.driverAssignment.duration?.actual,
-                    recipient: verificationData.recipientName.trim()
-                },
-                verification: {
-                    recipientName: verificationData.recipientName.trim(),
-                    photosUploaded: photoUrls.length,
-                    videoUploaded: !!videoUrl,
-                    tokenVerified: true
-                },
                 earnings: {
                     base: baseEarnings,
                     penalty: penalty,
                     final: finalEarnings,
                     currency: order.pricing?.currency || 'NGN',
-                    breakdown: penalty > 0 ? {
-                        baseEarnings: `₦${baseEarnings.toFixed(2)}`,
-                        penalty: `-₦${penalty.toFixed(2)}`,
-                        finalEarnings: `₦${finalEarnings.toFixed(2)}`,
-                        note: penalty > 0 ? 'Penalty applied for late arrival' : null
-                    } : null
                 },
                 requiresRating: true,
                 nextAction: {
@@ -3160,7 +3212,7 @@ class DriverController {
                     orderRef: order.orderRef,
                     clientId: order.clientId,
                     earnings: finalEarnings
-                }
+                },
             };
 
             return res.status(200).json(response);
@@ -3171,11 +3223,13 @@ class DriverController {
             return res.status(500).json({
                 error: "An error occurred while completing delivery",
                 ...(process.env.NODE_ENV === 'development' && {
-                    details: error.message
+                    details: error.message,
+                    stack: error.stack
                 })
             });
         }
     }
+
 
     /**
      * POST /driver/cancel-order
@@ -4268,19 +4322,17 @@ class DriverController {
 
     }
 
-    // DriverController.js - Delivery Analytics Method
-
     static async driverDeliveryAnalytics(req, res) {
         const preCheckResult = await AuthController.apiPreCheck(req);
 
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
+        const {userData} = preCheckResult;
         const driverId = userData._id;
 
         try {
@@ -4291,12 +4343,16 @@ class DriverController {
                 offset = 0,
                 status = 'all' // 'all', 'delivered', 'cancelled'
             } = req.query;
+            console.log({
+                params: req.query
+            })
+            const endYear = new Date().getFullYear();
 
-            const { Order } = await getOrderModels();
-            const { DriverAnalytics } = await getAnalyticsModels();
+            const {Order} = await getOrderModels();
+            const {DriverAnalytics} = await getAnalyticsModels();
 
             // Get analytics summary
-            const analytics = await DriverAnalytics.findOne({ driverId });
+            const analytics = await DriverAnalytics.findOne({driverId});
 
             if (!analytics) {
                 return res.status(404).json({
@@ -4314,18 +4370,22 @@ class DriverController {
             if (status !== 'all') {
                 query.status = status;
             }
+            console.log({
+                month, year
+            })
 
             // Filter by month/year if specified
             if (month && year) {
+                console.log('Yay')
                 const startDate = new Date(year, month - 1, 1);
-                const endDate = new Date(year, month, 0, 23, 59, 59, 999);
-                query.createdAt = { $gte: startDate, $lte: endDate };
+                const endDate = new Date(endYear, 11, 31, 23, 59, 59, 999);
+                query.createdAt = {$gte: startDate, $lte: endDate};
             } else {
-                // Default to current month if no filter specified
-                const now = new Date();
-                const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-                const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
-                query.createdAt = { $gte: startOfMonth, $lte: endOfMonth };
+                // Default to start of the month of the current year to the end of the year decemeber
+                console.log('Nay')
+                const startOfMonth = new Date(endYear, 0, 1);
+                const endOfMonth = new Date(endYear, 11, 31, 23, 59, 59, 999); // FIX: Use 31 for December
+                query.createdAt = {$gte: startOfMonth, $lte: endOfMonth};
             }
 
             // Get total count for pagination
@@ -4337,6 +4397,7 @@ class DriverController {
                     orderRef: 1,
                     status: 1,
                     pricing: 1,
+                    payment: 1,
                     location: 1,
                     package: 1,
                     createdAt: 1,
@@ -4350,29 +4411,29 @@ class DriverController {
                     deliveryToken: 1,
                     tokenVerified: 1
                 })
-                .sort({ createdAt: -1 })
+                .sort({createdAt: -1})
                 .limit(parseInt(limit))
                 .skip(parseInt(offset))
                 .lean();
 
             // Calculate summary stats for current filter
             const summaryPipeline = [
-                { $match: query },
+                {$match: query},
                 {
                     $group: {
                         _id: null,
-                        totalDeliveries: { $sum: 1 },
-                        totalEarnings: { $sum: '$pricing.totalAmount' },
-                        totalDistance: { $sum: '$driverAssignment.distance.total' },
+                        totalDeliveries: {$sum: 1},
+                        totalEarnings: {$sum: '$payment.financialBreakdown.driverShare'},
+                        totalDistance: {$sum: '$driverAssignment.distance.total'},
                         completedCount: {
-                            $sum: { $cond: [{ $eq: ['$status', 'delivered'] }, 1, 0] }
+                            $sum: {$cond: [{$eq: ['$status', 'delivered']}, 1, 0]}
                         },
                         cancelledCount: {
-                            $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] }
+                            $sum: {$cond: [{$eq: ['$status', 'cancelled']}, 1, 0]}
                         },
-                        avgEarnings: { $avg: '$pricing.totalAmount' },
-                        avgDistance: { $avg: '$driverAssignment.distance.total' },
-                        avgDuration: { $avg: '$driverAssignment.duration.actual' }
+                        avgEarnings: {$avg: '$payment.financialBreakdown.driverShare'},
+                        avgDistance: {$avg: '$driverAssignment.distance.total'},
+                        avgDuration: {$avg: '$driverAssignment.duration.actual'}
                     }
                 }
             ];
@@ -4390,7 +4451,7 @@ class DriverController {
             };
 
             // Get weekly data for chart (last 7 days)
-            const last7Days = Array.from({ length: 7 }, (_, i) => {
+            const last7Days = Array.from({length: 7}, (_, i) => {
                 const date = new Date();
                 date.setDate(date.getDate() - (6 - i));
                 date.setHours(0, 0, 0, 0);
@@ -4406,22 +4467,22 @@ class DriverController {
                         {
                             $match: {
                                 'driverAssignment.driverId': new mongoose.Types.ObjectId(driverId),
-                                createdAt: { $gte: date, $lt: nextDay },
+                                createdAt: {$gte: date, $lt: nextDay},
                                 status: 'delivered'
                             }
                         },
                         {
                             $group: {
                                 _id: null,
-                                deliveries: { $sum: 1 },
-                                earnings: { $sum: '$pricing.totalAmount' }
+                                deliveries: {$sum: 1},
+                                earnings: {$sum: '$payment.financialBreakdown.driverShare'}
                             }
                         }
                     ]);
 
                     return {
                         date: date.toISOString().split('T')[0],
-                        dayName: date.toLocaleDateString('en-US', { weekday: 'short' }),
+                        dayName: date.toLocaleDateString('en-US', {weekday: 'short'}),
                         deliveries: dayStats[0]?.deliveries || 0,
                         earnings: dayStats[0]?.earnings || 0
                     };
@@ -4443,12 +4504,12 @@ class DriverController {
                 },
                 {
                     $group: {
-                        _id: { $month: '$createdAt' },
-                        deliveries: { $sum: 1 },
-                        earnings: { $sum: '$pricing.totalAmount' }
+                        _id: {$month: '$createdAt'},
+                        deliveries: {$sum: 1},
+                        earnings: {$sum: '$payment.financialBreakdown.driverShare'}
                     }
                 },
-                { $sort: { _id: 1 } }
+                {$sort: {_id: 1}}
             ]);
 
             const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -4471,13 +4532,13 @@ class DriverController {
                 {
                     $group: {
                         _id: {
-                            year: { $year: '$createdAt' },
-                            month: { $month: '$createdAt' }
+                            year: {$year: '$createdAt'},
+                            month: {$month: '$createdAt'}
                         },
-                        count: { $sum: 1 }
+                        count: {$sum: 1}
                     }
                 },
-                { $sort: { '_id.year': -1, '_id.month': -1 } }
+                {$sort: {'_id.year': -1, '_id.month': -1}}
             ]);
 
             const periods = availablePeriods.map(p => ({
@@ -4492,7 +4553,7 @@ class DriverController {
                 id: delivery._id.toString(),
                 orderRef: delivery.orderRef,
                 status: delivery.status,
-                earnings: delivery.pricing?.totalAmount || 0,
+                earnings: delivery.payment.financialBreakdown.driverShare || 0,
                 distance: delivery.driverAssignment?.distance?.total || 0,
                 duration: delivery.driverAssignment?.duration?.actual || 0,
                 pickupLocation: {
@@ -4564,16 +4625,16 @@ class DriverController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
+        const {userData} = preCheckResult;
         const driverId = userData._id;
-        const { orderId } = req.params;
+        const {orderId} = req.params;
 
         try {
-            const { Order } = await getOrderModels();
+            const {Order} = await getOrderModels();
 
             // Find the order and verify it belongs to this driver
             const delivery = await Order.findOne({
@@ -4602,7 +4663,7 @@ class DriverController {
         }
     }
 
-    static async migrateAnalytics(req, res){
+    static async migrateAnalytics(req, res) {
         try {
             const {
                 batchSize = 50,
@@ -4610,7 +4671,7 @@ class DriverController {
                 skipExisting = true
             } = req.body;
 
-            console.log('📊 Migration requested with options:', { batchSize, driverLimit, skipExisting });
+            console.log('📊 Migration requested with options:', {batchSize, driverLimit, skipExisting});
 
             const migration = new AnalyticsMigration();
             const result = await migration.migrate({
@@ -4634,6 +4695,950 @@ class DriverController {
             });
         }
     }
+
+    /**
+     * Calculate Paystack fees from customer payment amount
+     * This reverses the fee calculation to extract what Paystack took
+     */
+    static async calculatePaystackFeeFromCustomerAmount(customerAmount) {
+        const PAYSTACK_DECIMAL_FEE = 0.015; // 1.5%
+        const PAYSTACK_FLAT_FEE = 100; // ₦100
+        const PAYSTACK_FEE_CAP = 2000; // ₦2,000
+        const FLAT_FEE_THRESHOLD = 2500; // ₦2,500
+
+        // Determine if flat fee applies
+        const effectiveFlatFee = customerAmount < FLAT_FEE_THRESHOLD ? 0 : PAYSTACK_FLAT_FEE;
+
+        // Calculate Paystack fee from customer amount
+        let paystackFee, netAmount;
+
+        const applicableFees = (PAYSTACK_DECIMAL_FEE * customerAmount) + effectiveFlatFee;
+
+        if (applicableFees > PAYSTACK_FEE_CAP) {
+            paystackFee = PAYSTACK_FEE_CAP;
+            netAmount = customerAmount - PAYSTACK_FEE_CAP;
+        } else {
+            // Reverse calculation: customerAmount = (netAmount + flatFee) / (1 - decimalFee) + 0.01
+            // So: netAmount = (customerAmount - 0.01) * (1 - decimalFee) - flatFee
+            netAmount = (customerAmount - 0.01) * (1 - PAYSTACK_DECIMAL_FEE) - effectiveFlatFee;
+            paystackFee = customerAmount - netAmount;
+        }
+
+        // Calculate 70/30 split from net amount
+        const driverShare = Math.round(netAmount * 0.70);
+        const platformShare = Math.round(netAmount * 0.30);
+
+        return {
+            grossAmount: Math.round(customerAmount),
+            paystackFee: Math.round(paystackFee),
+            netAmount: Math.round(netAmount),
+            driverShare,
+            platformShare
+        };
+    }
+
+    /**
+     * Process all existing paid orders and create financial records
+     */
+    static async processRetroactiveFinancials() {
+        try {
+            console.log('🔄 Starting retroactive financial processing...\n');
+
+            const {Order} = await getOrderModels();
+            const {FinancialTransaction, DriverEarnings} = await getFinancialModels();
+
+            // Find all paid orders
+            const paidOrders = await Order.find({
+                'payment.status': 'paid',
+                'payment.paidAt': {$exists: true}
+            }).populate('driverAssignment.driverId', 'name email phone');
+
+            console.log(`📊 Found ${paidOrders.length} paid orders to process\n`);
+
+            let successCount = 0;
+            let skipCount = 0;
+            let errorCount = 0;
+            const errors = [];
+
+            for (const order of paidOrders) {
+                try {
+                    // Check if financial record already exists
+                    const existingRecord = await FinancialTransaction.findOne({
+                        orderId: order._id,
+                        transactionType: 'client_payment'
+                    });
+
+                    if (existingRecord) {
+                        console.log(`⏭️  Skipping ${order.orderRef} - Financial record already exists`);
+                        skipCount++;
+                        continue;
+                    }
+
+                    // Extract payment details
+                    const customerAmount = order.payment.amount;
+                    const paymentReference = order.payment.reference;
+                    const paidAt = order.payment.paidAt;
+                    const driverId = order.driverAssignment?.driverId?._id;
+
+                    // Calculate financial breakdown
+                    const breakdown = await DriverController.calculatePaystackFeeFromCustomerAmount(customerAmount);
+
+                    // 1. Create CLIENT PAYMENT transaction
+                    const clientPaymentTx = new FinancialTransaction({
+                        transactionType: 'client_payment',
+                        orderId: order._id,
+                        clientId: order.clientId,
+                        amount: {
+                            gross: breakdown.grossAmount,
+                            fees: breakdown.paystackFee,
+                            net: breakdown.netAmount,
+                            currency: 'NGN'
+                        },
+                        gateway: {
+                            provider: 'paystack',
+                            reference: paymentReference,
+                            metadata: {
+                                paystackTransactionId: order.payment.paystackData?.id || null
+                            }
+                        },
+                        status: 'completed',
+                        processedAt: paidAt,
+                        processedBy: 'system',
+                        metadata: {
+                            description: `Retroactive processing for order ${order.orderRef}`,
+                            channel: 'retroactive',
+                            notes: `Original payment date: ${paidAt.toISOString()}`
+                        }
+                    });
+
+                    await clientPaymentTx.save();
+
+                    // 2. If order is delivered, create DRIVER EARNING and PLATFORM REVENUE
+                    if (order.status === 'delivered' && driverId) {
+                        // Create driver earning transaction
+                        const driverEarningTx = new FinancialTransaction({
+                            transactionType: 'driver_earning',
+                            orderId: order._id,
+                            clientId: order.clientId,
+                            driverId: driverId,
+                            amount: {
+                                gross: breakdown.driverShare,
+                                fees: 0,
+                                net: breakdown.driverShare,
+                                currency: 'NGN'
+                            },
+                            distribution: {
+                                driverShare: breakdown.driverShare,
+                                platformShare: 0,
+                                calculated: true
+                            },
+                            status: 'completed',
+                            processedAt: paidAt,
+                            processedBy: 'system',
+                            metadata: {
+                                description: `Driver 70% share for ${order.orderRef}`,
+                                channel: 'retroactive',
+                                notes: 'Revenue split: 70% driver, 30% platform'
+                            }
+                        });
+
+                        await driverEarningTx.save();
+
+                        // Create platform revenue transaction
+                        const platformRevenueTx = new FinancialTransaction({
+                            transactionType: 'platform_revenue',
+                            orderId: order._id,
+                            clientId: order.clientId,
+                            amount: {
+                                gross: breakdown.platformShare,
+                                fees: 0,
+                                net: breakdown.platformShare,
+                                currency: 'NGN'
+                            },
+                            distribution: {
+                                driverShare: 0,
+                                platformShare: breakdown.platformShare,
+                                calculated: true
+                            },
+                            status: 'completed',
+                            processedAt: paidAt,
+                            processedBy: 'system',
+                            metadata: {
+                                description: `Platform 30% share for ${order.orderRef}`,
+                                channel: 'retroactive',
+                                notes: 'Revenue split: 70% driver, 30% platform'
+                            }
+                        });
+
+                        await platformRevenueTx.save();
+
+                        // Update/Create driver earnings record
+                        let driverEarnings = await DriverEarnings.findOne({driverId});
+                        if (!driverEarnings) {
+                            driverEarnings = new DriverEarnings({
+                                driverId,
+                                availableBalance: breakdown.driverShare,
+                                earnings: {
+                                    available: breakdown.driverShare,
+                                    pending: 0,
+                                    withdrawn: 0
+                                },
+                                lifetime: {
+                                    totalEarned: breakdown.driverShare,
+                                    totalWithdrawn: 0,
+                                    totalPending: 0,
+                                    deliveryCount: 1,
+                                    averagePerDelivery: breakdown.driverShare,
+                                    firstEarningAt: paidAt,
+                                    lastEarningAt: paidAt
+                                }
+                            });
+                        } else {
+                            driverEarnings.availableBalance += breakdown.driverShare;
+                            driverEarnings.earnings.available += breakdown.driverShare;
+                            driverEarnings.lifetime.totalEarned += breakdown.driverShare;
+                            driverEarnings.lifetime.deliveryCount += 1;
+                            driverEarnings.lifetime.averagePerDelivery =
+                                driverEarnings.lifetime.totalEarned / driverEarnings.lifetime.deliveryCount;
+                            driverEarnings.lifetime.lastEarningAt = paidAt;
+                        }
+
+                        // Add to recent earnings
+                        driverEarnings.recentEarnings.unshift({
+                            transactionId: driverEarningTx._id,
+                            orderId: order._id,
+                            amount: breakdown.driverShare,
+                            status: 'available',
+                            earnedAt: paidAt
+                        });
+
+                        if (driverEarnings.recentEarnings.length > 20) {
+                            driverEarnings.recentEarnings = driverEarnings.recentEarnings.slice(0, 20);
+                        }
+
+                        await driverEarnings.save();
+                    }
+
+                    // 3. Update order with financial breakdown
+                    await Order.findByIdAndUpdate(order._id, {
+                        $set: {
+                            'payment.financialBreakdown': {
+                                grossAmount: breakdown.grossAmount,
+                                paystackFee: breakdown.paystackFee,
+                                netAmount: breakdown.netAmount,
+                                driverShare: breakdown.driverShare,
+                                platformShare: breakdown.platformShare,
+                                currency: 'NGN'
+                            },
+                            'payment.clientPaymentTransactionId': clientPaymentTx._id
+                        }
+                    });
+
+                    const deliveryStatus = order.status === 'delivered' ? '✅ Delivered' : '⏳ Pending';
+                    console.log(`✅ ${order.orderRef} ${deliveryStatus}: ₦${customerAmount.toLocaleString()} → Net: ₦${breakdown.netAmount.toLocaleString()} (Driver: ₦${breakdown.driverShare.toLocaleString()}, Platform: ₦${breakdown.platformShare.toLocaleString()}, Paystack: ₦${breakdown.paystackFee.toLocaleString()})`);
+                    successCount++;
+
+                } catch (error) {
+                    console.error(`❌ Error processing ${order.orderRef}:`, error.message);
+                    errors.push({
+                        orderRef: order.orderRef,
+                        error: error.message
+                    });
+                    errorCount++;
+                }
+            }
+
+            // Print summary
+            console.log('\n' + '='.repeat(80));
+            console.log('📈 PROCESSING SUMMARY');
+            console.log('='.repeat(80));
+            console.log(`✅ Successfully processed: ${successCount}`);
+            console.log(`⏭️  Skipped (existing): ${skipCount}`);
+            console.log(`❌ Errors: ${errorCount}`);
+            console.log(`📊 Total orders: ${paidOrders.length}`);
+
+            if (errors.length > 0) {
+                console.log('\n❌ ERRORS:');
+                errors.forEach(err => {
+                    console.log(`   ${err.orderRef}: ${err.error}`);
+                });
+            }
+
+            // Calculate totals from FinancialTransaction
+            const clientPayments = await FinancialTransaction.aggregate([
+                {
+                    $match: {
+                        transactionType: 'client_payment',
+                        'metadata.channel': 'retroactive'
+                    }
+                },
+                {
+                    $group: {
+                        _id: null,
+                        totalGross: {$sum: '$amount.gross'},
+                        totalFees: {$sum: '$amount.fees'},
+                        totalNet: {$sum: '$amount.net'},
+                        count: {$sum: 1}
+                    }
+                }
+            ]);
+
+            const driverEarnings = await FinancialTransaction.aggregate([
+                {
+                    $match: {
+                        transactionType: 'driver_earning',
+                        'metadata.channel': 'retroactive'
+                    }
+                },
+                {
+                    $group: {
+                        _id: null,
+                        totalDriverEarnings: {$sum: '$amount.net'},
+                        count: {$sum: 1}
+                    }
+                }
+            ]);
+
+            const platformRevenue = await FinancialTransaction.aggregate([
+                {
+                    $match: {
+                        transactionType: 'platform_revenue',
+                        'metadata.channel': 'retroactive'
+                    }
+                },
+                {
+                    $group: {
+                        _id: null,
+                        totalPlatformRevenue: {$sum: '$amount.net'},
+                        count: {$sum: 1}
+                    }
+                }
+            ]);
+
+            if (clientPayments.length > 0) {
+                const payments = clientPayments[0];
+                const drivers = driverEarnings[0] || {totalDriverEarnings: 0, count: 0};
+                const platform = platformRevenue[0] || {totalPlatformRevenue: 0, count: 0};
+
+                console.log('\n' + '='.repeat(80));
+                console.log('💰 FINANCIAL SUMMARY (Retroactive Records)');
+                console.log('='.repeat(80));
+                console.log(`Total Customer Payments:     ₦${payments.totalGross.toLocaleString()}`);
+                console.log(`Total Paystack Fees:         ₦${payments.totalFees.toLocaleString()}`);
+                console.log(`Total Net Amount:            ₦${payments.totalNet.toLocaleString()}`);
+                console.log(`├─ Driver Earnings (70%):    ₦${drivers.totalDriverEarnings.toLocaleString()} (${drivers.count} deliveries)`);
+                console.log(`└─ Platform Revenue (30%):   ₦${platform.totalPlatformRevenue.toLocaleString()}`);
+                console.log(`\nPayment Transactions: ${payments.count}`);
+            }
+
+            console.log('\n✅ Retroactive processing completed!\n');
+
+        } catch (error) {
+            console.error('💥 Fatal error during retroactive processing:', error);
+            throw error;
+        }
+    }
+
+    static async updateOrderRecords(req, res) {
+        try {
+            await DriverController.processRetroactiveFinancials()
+
+            res.json({
+                success: true,
+                message: 'Migration completed successfully',
+            });
+
+        } catch (err) {
+            console.error('Update Records error:', err);
+            res.status(500).json({
+                success: false,
+                message: 'Migration failed',
+                error: error.message
+            });
+        }
+
+    }
+
+    /**
+     * Get comprehensive earnings analytics for driver
+     * GET /api/driver/earnings-analytics
+     */
+    static async driverEarningsAnalytics(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const driverId = userData._id;
+
+        try {
+            const {
+                month,
+                year,
+                period = 'month', // week, month, year, all
+                limit = 50,
+                offset = 0
+            } = req.query;
+
+            const {FinancialTransaction, DriverEarnings} = await getFinancialModels();
+
+            // Get driver earnings summary
+            const driverEarnings = await DriverEarnings.findOne({driverId});
+
+            if (!driverEarnings) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'No earnings found for this driver'
+                });
+            }
+
+            // Build date filter
+            let dateFilter = {};
+            const now = new Date();
+
+            if (month && year) {
+                // Specific month
+                const startDate = new Date(year, month - 1, 1);
+                const endDate = new Date(year, month, 0, 23, 59, 59, 999);
+                dateFilter = {$gte: startDate, $lte: endDate};
+            } else if (period === 'week') {
+                // Last 7 days
+                const weekAgo = new Date(now);
+                weekAgo.setDate(weekAgo.getDate() - 7);
+                dateFilter = {$gte: weekAgo};
+            } else if (period === 'month') {
+                // Current month
+                const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+                dateFilter = {$gte: startOfMonth};
+            } else if (period === 'year') {
+                // Current year
+                const startOfYear = new Date(now.getFullYear(), 0, 1);
+                dateFilter = {$gte: startOfYear};
+            }
+
+            // Build query for transactions
+            const transactionQuery = {
+                driverId: new mongoose.Types.ObjectId(driverId),
+                transactionType: {$in: ['driver_earning', 'driver_payout']},
+                status: 'completed'
+            };
+
+            if (Object.keys(dateFilter).length > 0) {
+                transactionQuery.processedAt = dateFilter;
+            }
+
+            // Get paginated transactions
+            const transactions = await FinancialTransaction.find(transactionQuery)
+                .populate('orderId', 'orderRef status location pricing')
+                .sort({processedAt: -1})
+                .limit(parseInt(limit))
+                .skip(parseInt(offset))
+                .lean();
+
+            const totalTransactions = await FinancialTransaction.countDocuments(transactionQuery);
+
+            // Calculate period summary
+            const periodSummary = await FinancialTransaction.aggregate([
+                {$match: transactionQuery},
+                {
+                    $group: {
+                        _id: '$transactionType',
+                        totalAmount: {$sum: '$amount.net'},
+                        count: {$sum: 1},
+                        avgAmount: {$avg: '$amount.net'}
+                    }
+                }
+            ]);
+
+            const earnings = periodSummary.find(s => s._id === 'driver_earning') || {
+                totalAmount: 0,
+                count: 0,
+                avgAmount: 0
+            };
+            const payouts = periodSummary.find(s => s._id === 'driver_payout') || {
+                totalAmount: 0,
+                count: 0,
+                avgAmount: 0
+            };
+
+            // Get weekly chart data (last 7 days)
+            const last7Days = Array.from({length: 7}, (_, i) => {
+                const date = new Date();
+                date.setDate(date.getDate() - (6 - i));
+                date.setHours(0, 0, 0, 0);
+                return date;
+            });
+
+            const weeklyData = await Promise.all(
+                last7Days.map(async (date) => {
+                    const nextDay = new Date(date);
+                    nextDay.setDate(date.getDate() + 1);
+
+                    const dayStats = await FinancialTransaction.aggregate([
+                        {
+                            $match: {
+                                driverId: new mongoose.Types.ObjectId(driverId),
+                                transactionType: 'driver_earning',
+                                status: 'completed',
+                                processedAt: {$gte: date, $lt: nextDay}
+                            }
+                        },
+                        {
+                            $group: {
+                                _id: null,
+                                earnings: {$sum: '$amount.net'},
+                                deliveries: {$sum: 1}
+                            }
+                        }
+                    ]);
+
+                    return {
+                        date: date.toISOString().split('T')[0],
+                        dayName: date.toLocaleDateString('en-US', {weekday: 'short'}),
+                        earnings: dayStats[0]?.earnings || 0,
+                        deliveries: dayStats[0]?.deliveries || 0
+                    };
+                })
+            );
+
+            // Get monthly chart data (last 12 months or current year)
+            const currentYear = parseInt(year) || now.getFullYear();
+            const monthlyData = await FinancialTransaction.aggregate([
+                {
+                    $match: {
+                        driverId: new mongoose.Types.ObjectId(driverId),
+                        transactionType: 'driver_earning',
+                        status: 'completed',
+                        processedAt: {
+                            $gte: new Date(currentYear, 0, 1),
+                            $lte: new Date(currentYear, 11, 31, 23, 59, 59)
+                        }
+                    }
+                },
+                {
+                    $group: {
+                        _id: {$month: '$processedAt'},
+                        earnings: {$sum: '$amount.net'},
+                        deliveries: {$sum: 1}
+                    }
+                },
+                {$sort: {_id: 1}}
+            ]);
+
+            const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            const monthlyChartData = monthNames.map((name, index) => {
+                const monthData = monthlyData.find(m => m._id === index + 1);
+                return {
+                    month: name,
+                    earnings: monthData?.earnings || 0,
+                    deliveries: monthData?.deliveries || 0
+                };
+            });
+
+            // Get earnings breakdown by status
+            const earningsBreakdown = {
+                available: driverEarnings.earnings.available,
+                pending: driverEarnings.earnings.pending,
+                withdrawn: driverEarnings.earnings.withdrawn
+            };
+
+            // Get top earning days
+            const topEarningDays = await FinancialTransaction.aggregate([
+                {
+                    $match: {
+                        driverId: new mongoose.Types.ObjectId(driverId),
+                        transactionType: 'driver_earning',
+                        status: 'completed',
+                        ...(Object.keys(dateFilter).length > 0 && {processedAt: dateFilter})
+                    }
+                },
+                {
+                    $group: {
+                        _id: {
+                            date: {$dateToString: {format: '%Y-%m-%d', date: '$processedAt'}}
+                        },
+                        earnings: {$sum: '$amount.net'},
+                        deliveries: {$sum: 1}
+                    }
+                },
+                {$sort: {earnings: -1}},
+                {$limit: 5}
+            ]);
+
+            // Get recent payouts
+            const recentPayouts = await FinancialTransaction.find({
+                driverId: new mongoose.Types.ObjectId(driverId),
+                transactionType: 'driver_payout'
+            })
+                .sort({processedAt: -1})
+                .limit(10)
+                .lean();
+
+            // Available periods for filtering
+            const availablePeriods = await FinancialTransaction.aggregate([
+                {
+                    $match: {
+                        driverId: new mongoose.Types.ObjectId(driverId),
+                        transactionType: 'driver_earning'
+                    }
+                },
+                {
+                    $group: {
+                        _id: {
+                            year: {$year: '$processedAt'},
+                            month: {$month: '$processedAt'}
+                        },
+                        count: {$sum: 1},
+                        totalEarnings: {$sum: '$amount.net'}
+                    }
+                },
+                {$sort: {'_id.year': -1, '_id.month': -1}}
+            ]);
+
+            const periods = availablePeriods.map(p => ({
+                year: p._id.year,
+                month: p._id.month,
+                count: p.count,
+                earnings: p.totalEarnings,
+                label: `${monthNames[p._id.month - 1]} ${p._id.year}`
+            }));
+
+            // Format transactions for frontend
+            const formattedTransactions = transactions.map(tx => {
+                const isEarning = tx.transactionType === 'driver_earning';
+                return {
+                    id: tx._id.toString(),
+                    type: tx.transactionType,
+                    amount: tx.amount.net,
+                    gross: tx.amount.gross,
+                    fees: tx.amount.fees,
+                    status: tx.status,
+                    date: tx.processedAt,
+                    orderId: tx.orderId?._id?.toString(),
+                    orderRef: tx.orderId?.orderRef,
+                    description: isEarning
+                        ? `Delivery earnings for ${tx.orderId?.orderRef || 'order'}`
+                        : `Withdrawal to ${tx.payout?.bankDetails?.bankName || 'bank account'}`,
+                    metadata: tx.metadata
+                };
+            });
+
+            // Calculate growth metrics
+            const previousPeriodStart = new Date(dateFilter.$gte || now);
+            previousPeriodStart.setMonth(previousPeriodStart.getMonth() - 1);
+
+            const previousPeriodEarnings = await FinancialTransaction.aggregate([
+                {
+                    $match: {
+                        driverId: new mongoose.Types.ObjectId(driverId),
+                        transactionType: 'driver_earning',
+                        status: 'completed',
+                        processedAt: {
+                            $gte: previousPeriodStart,
+                            $lt: dateFilter.$gte || now
+                        }
+                    }
+                },
+                {
+                    $group: {
+                        _id: null,
+                        totalEarnings: {$sum: '$amount.net'},
+                        count: {$sum: 1}
+                    }
+                }
+            ]);
+
+            const prevEarnings = previousPeriodEarnings[0]?.totalEarnings || 0;
+            const currentEarnings = earnings.totalAmount;
+            const earningsGrowth = prevEarnings > 0
+                ? ((currentEarnings - prevEarnings) / prevEarnings * 100).toFixed(1)
+                : 0;
+
+            return res.status(200).json({
+                success: true,
+                data: {
+                    // Current balance and status
+                    balance: {
+                        available: driverEarnings.availableBalance,
+                        pending: driverEarnings.earnings.pending,
+                        withdrawn: driverEarnings.earnings.withdrawn,
+                        total: driverEarnings.lifetime.totalEarned
+                    },
+
+                    // Period summary
+                    summary: {
+                        periodEarnings: earnings.totalAmount,
+                        periodDeliveries: earnings.count,
+                        periodPayouts: payouts.totalAmount,
+                        periodPayoutCount: payouts.count,
+                        avgEarningsPerDelivery: earnings.avgAmount,
+                        earningsGrowth: parseFloat(earningsGrowth),
+                        netChange: currentEarnings - payouts.totalAmount
+                    },
+
+                    // Chart data
+                    charts: {
+                        weekly: weeklyData,
+                        monthly: monthlyChartData,
+                        topDays: topEarningDays.map(day => ({
+                            date: day._id.date,
+                            earnings: day.earnings,
+                            deliveries: day.deliveries
+                        }))
+                    },
+
+                    // Breakdown
+                    breakdown: earningsBreakdown,
+
+                    // Transactions list
+                    transactions: formattedTransactions,
+
+                    // Pagination
+                    pagination: {
+                        total: totalTransactions,
+                        limit: parseInt(limit),
+                        offset: parseInt(offset),
+                        hasMore: parseInt(offset) + parseInt(limit) < totalTransactions
+                    },
+
+                    // Filters
+                    filters: {
+                        availablePeriods: periods,
+                        currentMonth: month ? parseInt(month) : now.getMonth() + 1,
+                        currentYear: year ? parseInt(year) : now.getFullYear(),
+                        currentPeriod: period
+                    },
+
+                    // Lifetime statistics
+                    lifetime: {
+                        totalEarned: driverEarnings.lifetime.totalEarned,
+                        totalWithdrawn: driverEarnings.lifetime.totalWithdrawn,
+                        totalDeliveries: driverEarnings.lifetime.deliveryCount,
+                        averagePerDelivery: driverEarnings.lifetime.averagePerDelivery,
+                        firstEarningDate: driverEarnings.lifetime.firstEarningAt,
+                        lastEarningDate: driverEarnings.lifetime.lastEarningAt,
+                        lastWithdrawalDate: driverEarnings.lifetime.lastWithdrawalAt
+                    },
+
+                    // Recent activity
+                    recentActivity: {
+                        earnings: driverEarnings.recentEarnings.slice(0, 10).map(e => ({
+                            id: e.transactionId.toString(),
+                            orderId: e.orderId.toString(),
+                            amount: e.amount,
+                            status: e.status,
+                            date: e.earnedAt
+                        })),
+                        payouts: recentPayouts.map(p => ({
+                            id: p._id.toString(),
+                            amount: p.amount.gross,
+                            netAmount: p.amount.net,
+                            fee: p.amount.fees,
+                            status: p.status,
+                            bankName: p.payout?.bankDetails?.bankName,
+                            date: p.processedAt
+                        }))
+                    },
+
+                    // Withdrawal settings
+                    withdrawalSettings: {
+                        minimumAmount: driverEarnings.withdrawalSettings.minimumAmount,
+                        bankDetails: driverEarnings.bankDetails.verified ? {
+                            bankName: driverEarnings.bankDetails.bankName,
+                            accountNumber: driverEarnings.bankDetails.accountNumber?.replace(/\d(?=\d{4})/g, '*'),
+                            verified: driverEarnings.bankDetails.verified
+                        } : null
+                    }
+                }
+            });
+
+        } catch (error) {
+            console.error("Driver earnings analytics error:", error);
+            return res.status(500).json({
+                success: false,
+                error: "An error occurred while fetching earnings analytics"
+            });
+        }
+    }
+
+    /**
+     * Get single transaction details
+     * GET /api/driver/earnings/:transactionId
+     */
+    static async getSingleTransaction(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const driverId = userData._id;
+        const {transactionId} = req.params;
+
+        try {
+            const {FinancialTransaction} = await getFinancialModels();
+
+            const transaction = await FinancialTransaction.findOne({
+                _id: transactionId,
+                driverId
+            })
+                .populate('orderId')
+                .lean();
+
+            if (!transaction) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Transaction not found'
+                });
+            }
+
+            return res.status(200).json({
+                success: true,
+                data: transaction
+            });
+
+        } catch (error) {
+            console.error("Get transaction error:", error);
+            return res.status(500).json({
+                success: false,
+                error: "Failed to fetch transaction details"
+            });
+        }
+    }
+
+    static async updateDriverEarnings(req, res) {
+        try {
+            const result = await DriverController.updateDriverEarningsFromOrders(); // Fixed: added const result =
+            res.status(200).json({
+                success: true,
+                message: 'wallet updated', // Fixed: added missing comma
+                updatedCount: result.updatedCount
+            });
+
+        } catch (error) {
+            res.status(500).json({
+                success: false,
+                message: 'Internal server error',
+                error: error.message
+            });
+        }
+    }
+
+    static async updateDriverEarningsFromOrders() {
+        try {
+            console.log('Starting driver earnings update process...');
+            const { Driver } = await getModels();
+            const { Order } = await getOrderModels();
+
+            const drivers = await Driver.find({
+                'wallet.recentTransactions': { $exists: true, $not: { $size: 0 } },
+            }).exec();
+
+            console.log(`Found ${drivers.length} drivers to process`);
+
+            let updatedCount = 0;
+
+            for (const driver of drivers) {
+                try {
+                    console.log(`\n=== Processing driver: ${driver._id} - ${driver.fullName} ===`);
+
+                    let needsUpdate = false;
+                    const updatedTransactions = [];
+
+                    // Process each recent transaction
+                    for (const transaction of driver.wallet.recentTransactions) {
+                        if (transaction.type === 'earning' && transaction.orderId) {
+                            try {
+                                // Find the corresponding order
+                                const order = await Order.findById(transaction.orderId);
+                                if (order && order.payment.financialBreakdown) {
+                                    const expectedEarning = order.payment.financialBreakdown.driverShare;
+                                    const currentAmount = transaction.amount;
+
+                                    // DEBUG: Log both values
+                                    console.log(`🔍 Order: ${transaction.orderId}`);
+                                    console.log(`   Current wallet amount: ${currentAmount}`);
+                                    console.log(`   Expected from order: ${expectedEarning}`);
+                                    console.log(`   Difference: ${Math.abs(currentAmount - expectedEarning)}`);
+
+                                    // Check if amounts match
+                                    if (Math.abs(currentAmount - expectedEarning) > 0.01) {
+                                        console.log(`🔄 UPDATING: ${currentAmount} -> ${expectedEarning}`);
+
+                                        // Update ONLY the transaction amount
+                                        updatedTransactions.push({
+                                            ...transaction.toObject(),
+                                            amount: expectedEarning
+                                        });
+                                        needsUpdate = true;
+                                    } else {
+                                        console.log(`✅ MATCHES: ${currentAmount} == ${expectedEarning}`);
+                                        // Amounts match, keep original
+                                        updatedTransactions.push(transaction.toObject());
+                                    }
+                                } else {
+                                    console.log(`❌ Order ${transaction.orderId} not found or missing financial data`);
+                                    updatedTransactions.push(transaction.toObject());
+                                }
+                            } catch (orderError) {
+                                console.error(`❌ Error processing order ${transaction.orderId}:`, orderError.message);
+                                updatedTransactions.push(transaction.toObject());
+                            }
+                        } else {
+                            console.log(`ℹ️  Skipping non-earning transaction: ${transaction.type}`);
+                            updatedTransactions.push(transaction.toObject());
+                        }
+                    }
+
+                    // Update driver if transactions were modified
+                    if (needsUpdate) {
+                        console.log(`💾 Saving updates for driver ${driver._id}`);
+                        await Driver.findByIdAndUpdate(driver._id, {
+                            $set: {
+                                'wallet.recentTransactions': updatedTransactions
+                            }
+                        });
+
+                        updatedCount++;
+                        console.log(`✅ Updated driver ${driver._id}`);
+                    } else {
+                        console.log(`✅ No updates needed for driver ${driver._id}`);
+                    }
+
+                } catch (driverError) {
+                    console.error(`❌ Error processing driver ${driver._id}:`, driverError.message);
+                }
+            }
+
+            console.log(`\n🎉 Completed! Updated ${updatedCount} drivers`);
+            return {
+                success: true,
+                message: `Driver earnings update completed. Updated: ${updatedCount} drivers`,
+                updatedCount
+            };
+
+        } catch (error) {
+            console.error('❌ Error in updateDriverEarningsFromOrders:', error);
+            return {
+                success: false,
+                message: `Update failed: ${error.message}`,
+                updatedCount: 0
+            };
+        }
+    }
+
+
+
+
 
 }
 

@@ -30,7 +30,9 @@ const TimeBasedMetricsSchema = new Schema({
         tips: { type: Number, default: 0 },
         bonuses: { type: Number, default: 0 },
         penalties: { type: Number, default: 0 },
-        fuel: { type: Number, default: 0 }
+        fuel: { type: Number, default: 0 },
+        withdrawn: { type: Number, default: 0 },
+        fees: { type: Number, default: 0 }
     },
 
     // Performance Metrics
@@ -225,7 +227,8 @@ const DriverAnalyticsSchema = new Schema({
         totalHours: { type: Number, default: 0 },
         averageRating: { type: Number, default: 0 },
         memberSince: Date,
-        lastDeliveryDate: Date
+        lastDeliveryDate: Date,
+        lastWithdrawalDate: Date
     },
 
     // Time-based analytics (auto-aggregated)
@@ -428,6 +431,77 @@ DriverAnalyticsSchema.statics.recalculateRatingAverages = async function(driverI
     }
 
     return analytics;
+};
+
+// Add to DriverAnalyticsSchema.statics
+DriverAnalyticsSchema.statics.updateAfterWithdrawal = async function(driverId, withdrawalData) {
+    const {
+        amount,
+        fees,
+        netAmount,
+        period = new Date().toISOString().split('T')[0] // default to today
+    } = withdrawalData;
+
+    const today = period;
+    const weekKey = getWeekKey(new Date());
+    const monthKey = new Date().toISOString().substring(0, 7);
+    const yearKey = new Date().getFullYear().toString();
+
+    const update = {
+        $inc: {
+            'lifetime.totalWithdrawn': amount,
+            'lifetime.totalFees': fees
+        },
+        $set: {
+            'lifetime.lastWithdrawalDate': new Date()
+        }
+    };
+
+    // Update daily metrics
+    await this.updateOne(
+        { driverId, 'daily.period': today },
+        {
+            $inc: {
+                'daily.$.earnings.withdrawn': amount,
+                'daily.$.earnings.fees': fees
+            }
+        }
+    );
+
+    // Update weekly metrics
+    await this.updateOne(
+        { driverId, 'weekly.period': weekKey },
+        {
+            $inc: {
+                'weekly.$.earnings.withdrawn': amount,
+                'weekly.$.earnings.fees': fees
+            }
+        }
+    );
+
+    // Update monthly metrics
+    await this.updateOne(
+        { driverId, 'monthly.period': monthKey },
+        {
+            $inc: {
+                'monthly.$.earnings.withdrawn': amount,
+                'monthly.$.earnings.fees': fees
+            }
+        }
+    );
+
+    // Update yearly metrics
+    await this.updateOne(
+        { driverId, 'yearly.period': yearKey },
+        {
+            $inc: {
+                'yearly.$.earnings.withdrawn': amount,
+                'yearly.$.earnings.fees': fees
+            }
+        }
+    );
+
+    return await this.findOne({ driverId });
 };
 
 // Helper function to get week number
