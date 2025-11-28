@@ -67,7 +67,6 @@ const verifyWebhookSignature = (payload, signature) => {
         .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
         .update(payload, 'utf8')  // Use payload directly
         .digest('hex');
-    ;
 
     return hash === signature;
 };

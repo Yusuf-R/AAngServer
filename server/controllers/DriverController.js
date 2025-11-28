@@ -11,6 +11,7 @@ import NotificationService from "../services/NotificationService";
 import Notification from '../models/Notification';
 import getFinancialModels from '../models/Finance/FinancialTransactions';
 import FinancialService from "../services/FinancialService";
+import axios from "axios";
 
 const DELIVERY_STAGES = {
     DISCOVERING: 'discovering',
@@ -236,10 +237,6 @@ class DriverController {
             profileCompletion = Math.round((completionChecks / 9) * 100);
         }
 
-        console.log({
-            it: user.wallet.recentTransactions,
-        })
-
         // Enhanced dashboard data structure
         return {
             // Basic user info
@@ -347,7 +344,8 @@ class DriverController {
             verification: user.verification ? {
                 documentsStatus: user.verification.documentsStatus || {},
                 overallStatus: user.verification.overallStatus || 'pending',
-                complianceScore: user.verification.complianceScore || 100
+                complianceScore: user.verification.complianceScore || 100,
+                basicVerification: user.verification.basicVerification || false,
             } : null,
 
             // Schedule and availability
@@ -406,7 +404,10 @@ class DriverController {
 
             // Additional metadata
             authPin: user.authPin ? {
-                isEnabled: user.authPin.isEnabled
+                isEnabled: user.authPin.isEnabled,
+                failedAttempts: user.authPin.failedAttempts,
+                lastUsed: user.authPin.lastUsed,
+                lockedUntil: user.authPin.lockedUntil
             } : null,
 
             authMethods: user.authMethods?.map(method => ({
@@ -5536,11 +5537,11 @@ class DriverController {
     static async updateDriverEarningsFromOrders() {
         try {
             console.log('Starting driver earnings update process...');
-            const { Driver } = await getModels();
-            const { Order } = await getOrderModels();
+            const {Driver} = await getModels();
+            const {Order} = await getOrderModels();
 
             const drivers = await Driver.find({
-                'wallet.recentTransactions': { $exists: true, $not: { $size: 0 } },
+                'wallet.recentTransactions': {$exists: true, $not: {$size: 0}},
             }).exec();
 
             console.log(`Found ${drivers.length} drivers to process`);
@@ -5636,6 +5637,836 @@ class DriverController {
         }
     }
 
+    // Finance
+
+    static async getFinancialSummary(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const {period = 'all'} = req.query;
+        const driverId = userData._id;
+
+        try {
+            const summary = await FinancialService.getDriverFinancialSummary(driverId, period);
+            res.status(200).json({
+                success: true,
+                ...summary
+            });
+
+        } catch (error) {
+            res.status(500).json({
+                success: false,
+                message: 'Internal server error',
+                error: error.message
+            });
+        }
+    }
+
+    // controllers/DriverController.js
+    static async getEarningHistory(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { page = 1, limit = 20, type, status } = req.query;
+
+        const driverId = userData._id;
+
+        try {
+            const result = await FinancialService.getDriverFinancialTransactions(
+                driverId,
+                parseInt(page),
+                parseInt(limit),
+                { type, status }
+            );
+
+            res.status(200).json(result);
+
+        } catch (error) {
+            console.error('Error getting earning history:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Failed to load transaction history',
+                error: error.message
+            });
+        }
+    }
+
+    static async requestPayout(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+        const {userData} = preCheckResult;
+        const driverId = userData._id;
+
+        const {requestedAmount, bankDetails, fee, netAmount} = req.body;
+
+        if (!requestedAmount || requestedAmount < 500) {
+            return res.status(400).json({
+                success: false,
+                message: 'Minimum withdrawal amount is ₦500'
+            });
+        }
+
+        if (!bankDetails || !bankDetails.accountNumber || !bankDetails.bankCode || !fee || !netAmount) {
+            return res.status(400).json({
+                success: false,
+                message: 'Valid bank details are required'
+            });
+        }
+
+        // base on the requestedAmount, lets ensure the fee and netAmount are of integrity base on the BackEnd calc
+        const backEndFee = DriverController.calculateFee(requestedAmount);
+
+        if (fee !== backEndFee) {
+            return res.status(400).json({
+                success: false,
+                message: 'Fee is not correct'
+            });
+        }
+
+        const backEndNetAmount = requestedAmount - backEndFee;
+
+        if (backEndNetAmount !== netAmount ) {
+            return res.status(400).json({
+                success: false,
+                message: 'Fee is not correct'
+            });
+        }
+
+        try {
+            const result = await FinancialService.processDriverPayout({
+                driverId,
+                requestedAmount,
+                bankDetails
+            });
+
+            // Return the created payout transaction
+            const {FinancialTransaction} = await getFinancialModels();
+            const payoutTransaction = await FinancialTransaction.findById(result.transaction);
+
+            res.status(200).json({
+                success: true,
+                message: 'Withdrawal request submitted successfully',
+                payout: {
+                    _id: payoutTransaction._id,
+                    status: payoutTransaction.status,
+                    amount: payoutTransaction.amount,
+                    payout: payoutTransaction.payout,
+                    gateway: payoutTransaction.gateway,
+                    createdAt: payoutTransaction.createdAt
+                }
+            });
+
+        } catch (error) {
+            console.error('Request payout error:', error);
+            res.status(500).json({
+                success: false,
+                message: error.message || 'Failed to process withdrawal request',
+                error: error.message
+            });
+        }
+    }
+
+    static async verifyPayout(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { payoutId } = req.query;
+
+        try {
+            const { FinancialTransaction, DriverEarnings } = await getFinancialModels();
+
+            // Get transaction from DB
+            const transaction = await FinancialTransaction.findById(payoutId);
+
+            if (!transaction) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Payout not found'
+                });
+            }
+
+            // Verify it belongs to this driver
+            if (transaction.driverId.toString() !== userData._id.toString()) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Unauthorized access to this payout'
+                });
+            }
+
+            // If status is already final (completed/failed/reversed), return from DB
+            if (['completed', 'failed', 'reversed'].includes(transaction.status)) {
+                return res.status(200).json({
+                    success: true,
+                    status: transaction.status,
+                    payout: {
+                        _id: transaction._id,
+                        status: transaction.status,
+                        amount: transaction.amount,
+                        payout: transaction.payout,
+                        gateway: transaction.gateway,
+                        createdAt: transaction.createdAt,
+                        processedAt: transaction.processedAt
+                    }
+                });
+            }
+
+            // If status is pending/processing, verify with Paystack
+            const paystackReference = transaction.payout?.paystackTransferRef || transaction.gateway?.reference;
+
+            if (!paystackReference) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'No transfer reference found for this payout'
+                });
+            }
+
+            console.log(`Verifying transfer with Paystack: ${paystackReference}`);
+
+            // Call Paystack to verify transfer status
+            let paystackStatus;
+            try {
+                const verifyResponse = await axios.get(
+                    `https://api.paystack.co/transfer/verify/${paystackReference}`,
+                    {
+                        headers: {
+                            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+                            'Content-Type': 'application/json'
+                        }
+                    }
+                );
+
+                console.log('Paystack verification response:', verifyResponse.data);
+
+                if (verifyResponse.data.status && verifyResponse.data.data) {
+                    paystackStatus = verifyResponse.data.data.status;
+
+                    // Update our DB based on Paystack's response
+                    await FinancialService.updatePayoutFromPaystackStatus(
+                        transaction,
+                        paystackStatus,
+                        verifyResponse.data.data
+                    );
+
+                    // Fetch updated transaction
+                    const updatedTransaction = await FinancialTransaction.findById(payoutId);
+
+                    return res.status(200).json({
+                        success: true,
+                        status: updatedTransaction.status,
+                        paystackStatus: paystackStatus,
+                        payout: {
+                            _id: updatedTransaction._id,
+                            status: updatedTransaction.status,
+                            amount: updatedTransaction.amount,
+                            payout: updatedTransaction.payout,
+                            gateway: updatedTransaction.gateway,
+                            createdAt: updatedTransaction.createdAt,
+                            processedAt: updatedTransaction.processedAt,
+                            updatedAt: updatedTransaction.updatedAt
+                        }
+                    });
+                }
+
+            } catch (paystackError) {
+                console.error('Paystack verification error:', paystackError.response?.data || paystackError.message);
+
+                // If Paystack returns 404, transfer not found
+                if (paystackError.response?.status === 404) {
+                    return res.status(200).json({
+                        success: true,
+                        status: transaction.status,
+                        message: 'Transfer not yet visible in Paystack system. Please try again in a few moments.',
+                        payout: {
+                            _id: transaction._id,
+                            status: transaction.status,
+                            amount: transaction.amount,
+                            payout: transaction.payout,
+                            gateway: transaction.gateway,
+                            createdAt: transaction.createdAt
+                        }
+                    });
+                }
+
+                // For other Paystack errors, return current DB status with warning
+                return res.status(200).json({
+                    success: true,
+                    status: transaction.status,
+                    warning: 'Could not verify with payment provider. Showing last known status.',
+                    payout: {
+                        _id: transaction._id,
+                        status: transaction.status,
+                        amount: transaction.amount,
+                        payout: transaction.payout,
+                        gateway: transaction.gateway,
+                        createdAt: transaction.createdAt
+                    }
+                });
+            }
+
+        } catch (error) {
+            console.error('Error getting payout status:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Failed to get payout status'
+            });
+        }
+    }
+
+    static async getPayoutHistory(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+        const {userData} = preCheckResult;
+        const driverId = userData._id;
+
+        const filters = req.query;
+
+        try {
+            const {FinancialTransaction} = await getFinancialModels();
+
+            const query = {
+                driverId,
+                transactionType: 'driver_payout'
+            };
+
+            if (filters.status && filters.status !== 'all') {
+                query.status = filters.status;
+            }
+
+            const payouts = await FinancialTransaction.find(query)
+                .sort({createdAt: -1})
+                .limit(parseInt(filters.limit) || 50)
+                .lean();
+
+            const transformedPayouts = payouts.map(payout => ({
+                _id: payout._id,
+                status: payout.status,
+                amount: {
+                    gross: payout.amount?.gross || 0,
+                    fees: payout.amount?.fees || 0,
+                    net: payout.amount?.net || 0
+                },
+                payout: {
+                    requestedAmount: payout.payout?.requestedAmount || payout.amount?.gross || 0,
+                    transferFee: payout.payout?.transferFee || payout.amount?.fees || 0,
+                    netAmount: payout.payout?.netAmount || payout.amount?.net || 0,
+                    bankDetails: payout.payout?.bankDetails || {
+                        accountName: payout.bankDetails?.accountName || 'N/A',
+                        bankName: payout.bankDetails?.bankName || 'N/A',
+                        accountNumber: payout.bankDetails?.accountNumber || 'N/A'
+                    }
+                },
+                gateway: {
+                    reference: payout.gateway?.reference || payout.payout?.paystackTransferRef || 'N/A'
+                },
+                createdAt: payout.createdAt,
+                processedAt: payout.processedAt,
+                metadata: payout.metadata
+            }));
+
+            res.json({
+                success: true,
+                payouts: transformedPayouts,
+                pagination: {
+                    currentPage: 1,
+                    totalPages: 1,
+                    totalRecords: payouts.length,
+                    hasNext: false,
+                    hasPrev: false
+                }
+            });
+
+        } catch (error) {
+            res.status(500).json({
+                success: false,
+                message: 'Internal server error',
+                error: error.message
+            });
+        }
+    }
+
+    static async newBankAccount(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+        const {userData} = preCheckResult;
+        const {accountName, accountNumber, bankName, bankCode} = req.body;
+
+        if (!accountName || !accountNumber || !bankName || !bankCode) {
+            return res.status(400).json({
+                success: false,
+                message: 'Incomplete payload data'
+            });
+        }
+
+        const {Driver} = await getModels();
+        const driver = await Driver.findById(userData._id);
+
+        if (!driver) {
+            return res.status(404).json({message: 'Driver not found'});
+        }
+
+        try {
+            // Check if account number already exists
+            const existingAccount = driver.verification.basicVerification.bankAccounts.find(
+                acc => acc.accountNumber === accountNumber && acc.verified === true
+            );
+
+            if (existingAccount) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Bank account already exists'
+                });
+            }
+
+            // Create new bank account object
+            const newBankAccount = {
+                accountName: accountName.trim(),
+                accountNumber,
+                bankName,
+                bankCode,
+                isPrimary: driver.verification.basicVerification.bankAccounts.length === 0, // Set as primary if first account
+                verified: true,
+                verifiedAt: new Date(),
+                verificationMethod: 'manual',
+                addedAt: new Date()
+            };
+
+            // Add to bank accounts array
+            driver.verification.basicVerification.bankAccounts.push(newBankAccount);
+
+            // Update wallet bank details if this is the primary account
+            if (newBankAccount.isPrimary) {
+                driver.wallet.bankDetails = {
+                    accountName: newBankAccount.accountName,
+                    accountNumber: newBankAccount.accountNumber,
+                    bankName: newBankAccount.bankName,
+                    bankCode: newBankAccount.bankCode,
+                    verified: true,
+                    verificationDate: new Date()
+                };
+            }
+
+            await driver.save();
+
+            // Get updated user data for session
+            const updatedUserData = await DriverController.userDashBoardData(driver);
+
+            res.status(200).json({
+                success: true,
+                message: 'Bank account added successfully',
+                userData: updatedUserData
+            });
+
+        } catch (error) {
+            console.error('Add bank account error:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Internal server error',
+                error: error.message
+            });
+        }
+    }
+
+    static async updateBank(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+        const {userData} = preCheckResult;
+        const {accountName, accountNumber, bankName, bankCode, editingBankId} = req.body;
+
+        if (!accountName || !accountNumber || !bankName || !bankCode || !editingBankId) {
+            return res.status(400).json({
+                success: false,
+                message: 'Incomplete payload data'
+            });
+        }
+
+        const {Driver} = await getModels();
+        const driver = await Driver.findById(userData._id);
+
+        if (!driver) {
+            return res.status(404).json({message: 'Driver not found'});
+        }
+
+        try {
+            // Find the bank account to update
+            const bankAccountIndex = driver.verification.basicVerification.bankAccounts.findIndex(
+                acc => acc._id.toString() === editingBankId
+            );
+
+            if (bankAccountIndex === -1) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Bank account not found'
+                });
+            }
+
+            // Check if account number already exists (excluding current account)
+            const duplicateAccount = driver.verification.basicVerification.bankAccounts.find(
+                (acc, index) => index !== bankAccountIndex &&
+                    acc.accountNumber === accountNumber &&
+                    acc.verified === true
+            );
+
+            if (duplicateAccount) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Bank account number already exists'
+                });
+            }
+
+            // Update the bank account
+            const updatedBankAccount = {
+                ...driver.verification.basicVerification.bankAccounts[bankAccountIndex].toObject(),
+                accountName: accountName.trim(),
+                accountNumber,
+                bankName,
+                bankCode,
+                verified: true,
+                verifiedAt: new Date()
+            };
+
+            driver.verification.basicVerification.bankAccounts[bankAccountIndex] = updatedBankAccount;
+
+            // Update wallet bank details if this is the primary account
+            if (updatedBankAccount.isPrimary) {
+                driver.wallet.bankDetails = {
+                    accountName: updatedBankAccount.accountName,
+                    accountNumber: updatedBankAccount.accountNumber,
+                    bankName: updatedBankAccount.bankName,
+                    bankCode: updatedBankAccount.bankCode,
+                    verified: true,
+                    verificationDate: new Date()
+                };
+            }
+
+            await driver.save();
+
+            // Get updated user data for session
+            const updatedUserData = await DriverController.userDashBoardData(driver);
+
+            res.status(200).json({
+                success: true,
+                message: 'Bank account updated successfully',
+                userData: updatedUserData
+            });
+
+        } catch (error) {
+            console.error('Update bank account error:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Internal server error',
+                error: error.message
+            });
+        }
+    }
+
+    static async deleteBankAccount(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+        const {userData} = preCheckResult;
+        const {bankId} = req.body;
+
+        if (!bankId) {
+            return res.status(400).json({
+                success: false,
+                message: 'Bank account ID is required'
+            });
+        }
+
+        const {Driver} = await getModels();
+        const driver = await Driver.findById(userData._id);
+
+        if (!driver) {
+            return res.status(404).json({message: 'Driver not found'});
+        }
+
+        try {
+            // Find the bank account to delete
+            const bankAccountIndex = driver.verification.basicVerification.bankAccounts.findIndex(
+                acc => acc._id.toString() === bankId
+            );
+
+            if (bankAccountIndex === -1) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Bank account not found'
+                });
+            }
+
+            const bankAccountToDelete = driver.verification.basicVerification.bankAccounts[bankAccountIndex];
+            const wasPrimary = bankAccountToDelete.isPrimary;
+
+            // Remove the bank account
+            driver.verification.basicVerification.bankAccounts.splice(bankAccountIndex, 1);
+
+            // If deleted account was primary, set a new primary account or clear wallet details
+            if (wasPrimary) {
+                if (driver.verification.basicVerification.bankAccounts.length > 0) {
+                    // Set the first account as primary
+                    driver.verification.basicVerification.bankAccounts[0].isPrimary = true;
+
+                    const newPrimary = driver.verification.basicVerification.bankAccounts[0];
+                    driver.wallet.bankDetails = {
+                        accountName: newPrimary.accountName,
+                        accountNumber: newPrimary.accountNumber,
+                        bankName: newPrimary.bankName,
+                        bankCode: newPrimary.bankCode,
+                        verified: newPrimary.verified,
+                        verificationDate: newPrimary.verifiedAt
+                    };
+                } else {
+                    // No accounts left, clear wallet bank details
+                    driver.wallet.bankDetails = {
+                        accountName: '',
+                        accountNumber: '',
+                        bankName: '',
+                        bankCode: '',
+                        verified: false,
+                        verificationDate: null
+                    };
+                }
+            }
+
+            await driver.save();
+
+            // Get updated user data for session
+            const updatedUserData = await DriverController.userDashBoardData(driver);
+
+            res.status(200).json({
+                success: true,
+                message: 'Bank account deleted successfully',
+                userData: updatedUserData
+            });
+
+        } catch (error) {
+            console.error('Delete bank account error:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Internal server error',
+                error: error.message
+            });
+        }
+    }
+
+    static async setPrimaryBankAccount(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+        const {userData} = preCheckResult;
+        const {bankId} = req.body;
+
+        if (!bankId) {
+            return res.status(400).json({
+                success: false,
+                message: 'Bank account ID is required'
+            });
+        }
+
+        const {Driver} = await getModels();
+        const driver = await Driver.findById(userData._id);
+
+        if (!driver) {
+            return res.status(404).json({message: 'Driver not found'});
+        }
+
+        try {
+            // Reset all accounts to non-primary
+            driver.verification.basicVerification.bankAccounts.forEach(acc => {
+                acc.isPrimary = false;
+            });
+
+            // Find and set the specified account as primary
+            const primaryAccountIndex = driver.verification.basicVerification.bankAccounts.findIndex(
+                acc => acc._id.toString() === bankId
+            );
+
+            if (primaryAccountIndex === -1) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Bank account not found'
+                });
+            }
+
+            driver.verification.basicVerification.bankAccounts[primaryAccountIndex].isPrimary = true;
+
+            // Update wallet bank details
+            const primaryAccount = driver.verification.basicVerification.bankAccounts[primaryAccountIndex];
+            driver.wallet.bankDetails = {
+                accountName: primaryAccount.accountName,
+                accountNumber: primaryAccount.accountNumber,
+                bankName: primaryAccount.bankName,
+                bankCode: primaryAccount.bankCode,
+                verified: primaryAccount.verified,
+                verificationDate: primaryAccount.verifiedAt
+            };
+
+            await driver.save();
+
+            // Get updated user data for session
+            const updatedUserData = await DriverController.userDashBoardData(driver);
+
+            res.status(200).json({
+                success: true,
+                message: 'Primary bank account set successfully',
+                userData: updatedUserData
+            });
+
+        } catch (error) {
+            console.error('Set primary bank account error:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Internal server error',
+                error: error.message
+            });
+        }
+    }
+
+    // In your backend route handler
+    static async verifyWithdrawalPin(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { pin } = req.body;
+
+        if (!pin || pin.length !== 6) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please enter a valid 6-digit PIN'
+            });
+        }
+
+        const {Driver} = await getModels();
+        const driver = await Driver.findById(userData._id);
+
+        if (!driver) {
+            return res.status(404).json({message: 'Driver not found'});
+        }
+
+        try {
+            // Check if PIN is locked
+            if (driver.authPin.lockedUntil && new Date(driver.authPin.lockedUntil) > new Date()) {
+                return res.status(423).json({
+                    success: false,
+                    message: 'PIN is temporarily locked due to too many failed attempts'
+                });
+            }
+
+            // Verify PIN
+            const isPinValid = await AuthController.comparePasswords(pin, driver.authPin.pin);
+
+            if (isPinValid) {
+                // Reset failed attempts on successful verification
+                await Driver.findByIdAndUpdate(userData._id, {
+                    'authPin.failedAttempts': 0,
+                    'authPin.lastUsed': new Date()
+                });
+
+                return res.status(200).json({
+                    success: true,
+                    message: 'PIN verified successfully'
+                });
+            } else {
+                // Increment failed attempts
+                const newFailedAttempts = (driver.authPin.failedAttempts || 0) + 1;
+                let updateData = {
+                    'authPin.failedAttempts': newFailedAttempts
+                };
+
+                // Lock PIN after 3 failed attempts for 10 minutes
+                if (newFailedAttempts >= 3) {
+                    updateData['authPin.lockedUntil'] = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+                }
+
+                await Driver.findByIdAndUpdate(userData._id, updateData);
+
+                const attemptsLeft = 3 - newFailedAttempts;
+                return res.status(400).json({
+                    success: false,
+                    message: attemptsLeft > 0
+                        ? `Invalid PIN. ${attemptsLeft} attempt(s) remaining.`
+                        : 'Too many failed attempts. PIN has been locked for 10 minutes.'
+                });
+            }
+        } catch (error) {
+            console.log('PIN verification error:', error);
+            return res.status(500).json({
+                success: false,
+                message: 'Failed to verify PIN'
+            });
+        }
+    }
+
+    static calculateFee(withdrawalAmount) {
+        // New tiered fee structure for Nigeria
+        if (withdrawalAmount <= 5000) {
+            return 10;
+        } else if (withdrawalAmount <= 50000) {
+            return 25;
+        } else {
+            return 50;
+        }
+    }
 
 
 

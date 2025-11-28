@@ -9,6 +9,7 @@ const notificationRouter = require('./NotificationRoutes');
 const s3Router = require('./S3Routes');
 const orderRouter = require('./OrderRoutes');
 const driverRouter = require('./DriverRoutes');
+const webhookRouter = require('./WebHookRoutes');
 import initWebAdminRoutes from './WebAdminRoutes';
 
 const securityConfig = new SecurityConfig();
@@ -32,6 +33,8 @@ const createRouter = (io) => {
     router.use('/api/v1/order', orderRouter);
     router.use('/api/v1/driver', driverRouter);
     router.use('/api/v1/webadmin', webAdminRouter);
+    router.use('/api/v1/webhook', webhookRouter);
+
     
     return router;
 };

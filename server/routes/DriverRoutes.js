@@ -78,11 +78,16 @@ driverRouter.post('/analytics/migrate', driverController.migrateAnalytics)
 driverRouter.post('/retroactive/financials', driverController.updateOrderRecords)
 driverRouter.post('/update/earnings', driverController.updateDriverEarnings)
 
-
-
-
-
-
+// finance
+driverRouter.get('/finance/summary', driverController.getFinancialSummary)
+driverRouter.get('/finance/earning/history', driverController.getEarningHistory)
+driverRouter.get('/finance/payout/history', driverController.getPayoutHistory)
+driverRouter.post('/finance/bank/new', driverController.newBankAccount)
+driverRouter.patch('/finance/bank/update', driverController.updateBank)
+driverRouter.delete('/finance/bank/delete', driverController.deleteBankAccount)
+driverRouter.post('/finance/request/payout', driverController.requestPayout)
+driverRouter.get('/finance/verify/payout', driverController.verifyPayout)
+driverRouter.post('/finance/verify/pin', driverController.verifyWithdrawalPin)
 
 
 

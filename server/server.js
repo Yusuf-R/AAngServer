@@ -55,6 +55,11 @@ const router = createRouter(io);
 app.use('/api/v1/order/paystack-webhook', express.raw({
     type: 'application/json'
 }));
+
+app.use('/api/v1/webhook/paystack-webhook', express.raw({
+    type: 'application/json'
+}));
+
 app.use(router);
 
 const port = process.env.EXPRESS_PORT;
