@@ -22,7 +22,7 @@ class WebhookController {
 
             const parsedBody = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
             const {event, data} = parsedBody;
-            console.log('Webhook received:', {event, reference: data?.reference});
+            console.log('Webhook received:', {event, reference: data?.reference, data});
             let result;
 
             switch (event) {
@@ -70,6 +70,10 @@ class WebhookController {
             console.log('Webhook processing error:', error);
             return res.status(500).json({ error: 'Webhook processing failed' });
         }
+    }
+
+    static async test(req, res) {
+        return res.status(200).json({ message: 'Webhook processed successfully' });
     }
 
     static async verifyWebhookSignature (payload, signature) {

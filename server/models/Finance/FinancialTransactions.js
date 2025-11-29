@@ -232,12 +232,114 @@ const DriverEarningsSchema = new Schema({
         lastWithdrawalAt: Date
     },
 
-    // Breakdown by Status
+    pendingTransfers: [{
+        // Core identification
+        transactionId: {
+            type: Schema.Types.ObjectId,
+            required: true,
+            ref: 'FinancialTransaction'
+        },
+        paystackReference: {
+            type: String,
+            required: true,
+            index: true,
+            unique: true // Prevent duplicates
+        },
+        paystackTransferCode: String,
+
+        // Financial details
+        requestedAmount: { type: Number, required: true },
+        transferFee: { type: Number, required: true },
+        netAmount: { type: Number, required: true },
+
+        // 🔥 NEW: Balance snapshot for reconciliation
+        balanceBefore: { type: Number, required: true },
+        balanceAfter: { type: Number, required: true },
+
+        // Status tracking
+        status: {
+            type: String,
+            enum: ['pending', 'processing', 'completed', 'failed', 'reversed'],
+            default: 'pending',
+            index: true
+        },
+
+        // Timeline for audit
+        requestedAt: { type: Date, default: Date.now, index: true },
+        processedAt: Date,
+        lastVerifiedAt: Date, // Last time we checked Paystack
+
+        // 🔥 NEW: Auto-reconciliation tracking
+        reconciliationAttempts: { type: Number, default: 0 },
+        lastReconciliationAttempt: Date,
+        nextReconciliationAt: Date, // Schedule next check
+
+        // Paystack response data (for reconciliation)
+        paystackResponse: Schema.Types.Mixed,
+        webhookData: Schema.Types.Mixed,
+
+        // 🔥 NEW: Reconciliation flags
+        requiresManualCheck: { type: Boolean, default: false },
+        manualCheckReason: String,
+        reconciliationNotes: String,
+
+        // 🔥 NEW: Alert flags
+        isStuck: { type: Boolean, default: false },
+        stuckSince: Date,
+        adminNotified: { type: Boolean, default: false },
+
+        // Bank details for reference
+        bankDetails: {
+            accountName: String,
+            bankName: String,
+            accountNumber: String,
+            bankCode: String,
+            recipientCode: String
+        }
+    }],
+
+    // ============================================
+    // IMPROVED EARNINGS STRUCTURE
+    // ============================================
+
     earnings: {
-        available: {type: Number, default: 0},      // Can withdraw
-        pending: {type: Number, default: 0},        // Order in progress
-        withdrawn: {type: Number, default: 0}       // Already paid out
+        // 🔥 CLARIFIED: What drivers see as "available"
+        available: {
+            type: Number,
+            default: 0,
+            comment: 'Actual withdrawable balance (earnings - pending withdrawals)'
+        },
+
+        // 🔥 NEW: Total earned (never decreases)
+        totalEarned: {
+            type: Number,
+            default: 0,
+            comment: 'Lifetime earnings, only increases'
+        },
+
+        // Amount in pending withdrawals
+        pending: {
+            type: Number,
+            default: 0,
+            comment: 'Sum of all pending withdrawal amounts'
+        },
+
+        // Successfully withdrawn (historical)
+        withdrawn: {
+            type: Number,
+            default: 0,
+            comment: 'Total successfully withdrawn'
+        },
+
+        // 🔥 NEW: Failed withdrawals (refunded)
+        refunded: {
+            type: Number,
+            default: 0,
+            comment: 'Total from failed withdrawals that were refunded'
+        }
     },
+
+
 
     // ============================================
     // INTELLIGENT PAGINATION SYSTEM

@@ -16,6 +16,7 @@ webHookRouter.options('*', cors(corsOptions));
 
 
 webHookRouter.post('/paystack-webhook', webHookController.handlePaystackWebhook);
+// webHookRouter.post('/paystack-webhook', webHookController.test);
 
 
 module.exports = webHookRouter;

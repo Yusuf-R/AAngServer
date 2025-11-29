@@ -4,6 +4,7 @@ import getFinancialModels from '../models/Finance/FinancialTransactions.js';
 import getOrderModels from '../models/Order';
 import ReferenceGenerator from '../utils/ReferenceGenerator';
 import getModels from "../models/AAng/AAngLogistics";
+import mongoose from "mongoose";
 
 /**
  * Complete Financial Transaction Service
@@ -218,11 +219,16 @@ class FinancialService {
 
             const withdrawalsAggregate = await FinancialTransaction.aggregate([
                 { $match: { driverId, transactionType: 'driver_payout', status: 'completed' } },
-                { $group: { _id: null, total: { $sum: '$amount.net' }, count: { $sum: 1 } } }
+                { $group: { _id: null, total: { $sum: '$amount.gross' }, count: { $sum: 1 } } }
             ]);
 
             const earningsStats = earningsAggregate[0] || { total: 0, count: 0 };
             const withdrawalsStats = withdrawalsAggregate[0] || { total: 0, count: 0 };
+
+            console.log({
+                totalWithdraw: withdrawalsStats.total,
+                totalEarnings: earningsStats.total
+            })
 
             return {
                 success: true,
@@ -240,7 +246,8 @@ class FinancialService {
                     totalEarnings: earningsStats.total,
                     totalWithdrawals: withdrawalsStats.total,
                     earningsCount: earningsStats.count,
-                    withdrawalsCount: withdrawalsStats.count
+                    withdrawalsCount: withdrawalsStats.count,
+                    availableBalance: earningsStats.total - withdrawalsStats.total
                 }
             };
 
@@ -348,7 +355,7 @@ class FinancialService {
             // Paystack will return our reference
             const paystackResponse = transferResponse.data.data;
 
-            // 7. Record payout transaction
+            // Create transaction record FIRST (before balance changes)
             const payoutTransaction = new FinancialTransaction({
                 transactionType: 'driver_payout',
                 driverId,
@@ -378,6 +385,7 @@ class FinancialService {
                     reference: transferReference,
                     metadata: {
                         transfer_code: paystackResponse.transfer_code,
+                        paystack_response: paystackResponse,
                         initiated_at: new Date()
                     }
                 },
@@ -387,10 +395,37 @@ class FinancialService {
 
             await payoutTransaction.save();
 
-            // 8. Update driver earnings (deduct immediately but mark as pending)
+            const balanceBefore = driverEarnings.availableBalance;
+
+            // Deduct from available (money is now locked)
             driverEarnings.availableBalance -= requestedAmount;
-            driverEarnings.earnings.available -= requestedAmount;
-            driverEarnings.earnings.pending += requestedAmount; // Track as pending
+
+            // CRITICAL: Don't touch earnings.available yet
+            // Only update when we know final outcome
+
+            // Track this specific pending transfer
+            driverEarnings.pendingTransfers.push({
+                transactionId: payoutTransaction._id,
+                paystackReference: transferReference,
+                paystackTransferCode: paystackResponse.transfer_code,
+                requestedAmount: requestedAmount,
+                transferFee: transferFee,
+                netAmount: netAmount,
+                balanceBefore: balanceBefore, // Store for reconciliation
+                balanceAfter: driverEarnings.availableBalance,
+                status: 'pending',
+                requestedAt: new Date(),
+                paystackResponse: paystackResponse,
+                bankDetails: {
+                    accountName: bankDetails.accountName,
+                    bankName: bankDetails.bankName,
+                    accountNumber: bankDetails.accountNumber,
+                    bankCode: bankDetails.bankCode,
+                    recipientCode: recipientCode
+                }
+            });
+
+            // Update lifetime stats
             driverEarnings.lifetime.lastWithdrawalAt = new Date();
 
             // Add to recent payouts
@@ -402,12 +437,22 @@ class FinancialService {
                 requestedAt: new Date()
             });
 
-            // Keep only last 10 payouts
-            if (driverEarnings.recentPayouts.length > 10) {
+            // Keep only last 10 recent payouts
+            if (driverEarnings.recentPayouts.length > 50) {
                 driverEarnings.recentPayouts = driverEarnings.recentPayouts.slice(0, 10);
             }
 
             await driverEarnings.save();
+
+            // Commit transaction
+
+            console.log('✅ Payout processed successfully:', {
+                transactionId: payoutTransaction._id,
+                reference: transferReference,
+                amount: requestedAmount,
+                balanceBefore,
+                balanceAfter: driverEarnings.availableBalance
+            });
 
             return {
                 success: true,
@@ -417,15 +462,209 @@ class FinancialService {
                     transferFee,
                     netAmount,
                     reference: transferReference,
-                    status: 'pending'
+                    paystackStatus: paystackResponse.status,
+                    status: 'pending',
+                    balanceBefore,
+                    balanceAfter: driverEarnings.availableBalance
                 }
             };
 
         } catch (error) {
-            console.error('Error processing driver payout:', error);
+            console.log('❌ Error processing driver payout:', error);
             throw error;
         }
     }
+
+    /**
+     * Handle webhook SUCCESS - CORRECTED VERSION
+     */
+    static async handleTransferSuccess(webhookData) {
+        try {
+            const { FinancialTransaction, DriverEarnings } = await getFinancialModels();
+
+            const reference = webhookData.reference || webhookData.data?.reference;
+
+            // Find transaction
+            const transaction = await FinancialTransaction.findOne({
+                'gateway.reference': reference,
+                transactionType: 'driver_payout'
+            });
+
+            if (!transaction) {
+                console.error('❌ Transaction not found:', reference);
+                return { success: false, message: 'Transaction not found' };
+            }
+
+            // Prevent duplicate processing
+            if (transaction.status === 'completed') {
+                console.log('⚠️ Transaction already completed:', reference);
+                return { success: true, message: 'Already completed' };
+            }
+
+            // Update transaction
+            transaction.status = 'completed';
+            transaction.payout.transferStatus = 'success';
+            transaction.processedAt = new Date();
+            transaction.gateway.metadata.webhook_received_at = new Date();
+            transaction.gateway.metadata.webhook_data = webhookData;
+
+            await transaction.save();
+
+            // Update driver earnings
+            const driverEarnings = await DriverEarnings.findOne({
+                driverId: transaction.driverId
+            });
+
+            if (!driverEarnings) {
+                console.log('❌ Driver earnings not found');
+                return { success: false, message: 'Driver earnings not found' };
+            }
+
+            // Find the specific pending transfer
+            const pendingIndex = driverEarnings.pendingTransfers.findIndex(
+                pt => pt.paystackReference === reference && pt.status === 'pending'
+            );
+
+            if (pendingIndex === -1) {
+                console.log('❌ No pending transfer found for:', reference);
+                return { success: false, message: 'No pending transfer found' };
+            }
+
+            const pendingTransfer = driverEarnings.pendingTransfers[pendingIndex];
+
+            // CRITICAL: Update the specific pending transfer
+            pendingTransfer.status = 'completed';
+            pendingTransfer.processedAt = new Date();
+            pendingTransfer.webhookData = webhookData;
+            pendingTransfer.lastVerifiedAt = new Date();
+
+            // Update financial totals
+            // availableBalance was already reduced, so we don't touch it
+            // We only update the accounting fields
+            driverEarnings.earnings.available -= pendingTransfer.requestedAmount;
+            driverEarnings.earnings.withdrawn += pendingTransfer.requestedAmount;
+            driverEarnings.lifetime.totalWithdrawn += pendingTransfer.requestedAmount;
+
+            // Update recent payout status
+            const recentPayoutIndex = driverEarnings.recentPayouts.findIndex(
+                p => p.transactionId.toString() === transaction._id.toString()
+            );
+
+            if (recentPayoutIndex !== -1) {
+                driverEarnings.recentPayouts[recentPayoutIndex].status = 'completed';
+                driverEarnings.recentPayouts[recentPayoutIndex].processedAt = new Date();
+            }
+
+            await driverEarnings.save();
+
+            console.log('✅ Transfer completed successfully:', {
+                reference,
+                amount: pendingTransfer.requestedAmount,
+                driverId: transaction.driverId
+            });
+
+            return { success: true, message: 'Transfer completed successfully' };
+
+        } catch (error) {
+            console.error('❌ Error handling transfer success:', error);
+            return { success: false, message: error.message };
+        }
+    }
+
+    /**
+     * Handle webhook FAILED - CORRECTED VERSION
+     */
+    static async handleTransferFailed(webhookData) {
+        try {
+            const { FinancialTransaction, DriverEarnings } = await getFinancialModels();
+
+            const reference = webhookData.reference || webhookData.data?.reference;
+
+            // Find transaction
+            const transaction = await FinancialTransaction.findOne({
+                'gateway.reference': reference,
+                transactionType: 'driver_payout'
+            });
+
+            if (!transaction) {
+                console.error('❌ Transaction not found:', reference);
+                return { success: false, message: 'Transaction not found' };
+            }
+
+            // Prevent duplicate processing
+            if (transaction.status === 'failed' || transaction.status === 'reversed') {
+                console.log('⚠️ Transaction already processed as failed:', reference);
+                return { success: true, message: 'Already processed' };
+            }
+
+            // Update transaction
+            transaction.status = 'failed';
+            transaction.payout.transferStatus = 'failed';
+            transaction.processedAt = new Date();
+            transaction.gateway.metadata.webhook_received_at = new Date();
+            transaction.gateway.metadata.webhook_data = webhookData;
+            transaction.gateway.metadata.failure_reason =
+                webhookData.failures ||
+                webhookData.data?.failures ||
+                'Transfer failed';
+
+            await transaction.save();
+
+            // Update driver earnings - RESTORE BALANCE
+            const driverEarnings = await DriverEarnings.findOne({
+                driverId: transaction.driverId
+            });
+
+            if (!driverEarnings) {
+                console.error('❌ Driver earnings not found');
+                return { success: false, message: 'Driver earnings not found' };
+            }
+
+            // Find the pending transfer
+            const pendingIndex = driverEarnings.pendingTransfers.findIndex(
+                pt => pt.paystackReference === reference && pt.status === 'pending'
+            );
+
+            if (pendingIndex !== -1) {
+                const pendingTransfer = driverEarnings.pendingTransfers[pendingIndex];
+
+                // Mark as failed
+                pendingTransfer.status = 'failed';
+                pendingTransfer.processedAt = new Date();
+                pendingTransfer.webhookData = webhookData;
+
+                // CRITICAL: Restore the balance
+                driverEarnings.availableBalance += pendingTransfer.requestedAmount;
+
+                console.log('💰 Balance restored:', {
+                    reference,
+                    amount: pendingTransfer.requestedAmount,
+                    newBalance: driverEarnings.availableBalance
+                });
+            }
+
+            // Update recent payout
+            const recentPayoutIndex = driverEarnings.recentPayouts.findIndex(
+                p => p.transactionId.toString() === transaction._id.toString()
+            );
+
+            if (recentPayoutIndex !== -1) {
+                driverEarnings.recentPayouts[recentPayoutIndex].status = 'failed';
+                driverEarnings.recentPayouts[recentPayoutIndex].processedAt = new Date();
+            }
+
+            await driverEarnings.save();
+
+            console.log('✅ Transfer failed, funds restored:', reference);
+            return { success: true, message: 'Transfer failed, funds restored' };
+
+        } catch (error) {
+            console.error('❌ Error handling transfer failure:', error);
+            return { success: false, message: error.message };
+        }
+    }
+
+
 
     /**
      * Calculate transfer fee based on tiered structure
@@ -466,132 +705,6 @@ class FinancialService {
     }
 
     /**
-     * Handle transfer webhook - SUCCESS
-     */
-    static async handleTransferSuccess(webhookData) {
-        try {
-            const {FinancialTransaction, DriverEarnings} = await getFinancialModels();
-
-            const reference = webhookData.reference || webhookData.data?.reference;
-            const transferCode = webhookData.transfer_code || webhookData.data?.transfer_code;
-
-            // Find the transaction
-            const transaction = await FinancialTransaction.findOne({
-                'gateway.reference': reference,
-                transactionType: 'driver_payout'
-            });
-
-            if (!transaction) {
-                console.error('Transaction not found for reference:', reference);
-                return {success: false, message: 'Transaction not found'};
-            }
-
-            // Update transaction status
-            transaction.status = 'completed';
-            transaction.payout.transferStatus = 'success';
-            transaction.processedAt = new Date();
-            transaction.gateway.metadata.completed_at = webhookData.updatedAt || webhookData.data?.updatedAt || new Date();
-            transaction.gateway.metadata.webhook_received_at = new Date();
-
-            await transaction.save();
-
-            // Update driver earnings
-            const driverEarnings = await DriverEarnings.findOne({
-                driverId: transaction.driverId
-            });
-
-            if (driverEarnings) {
-                // Move from pending to withdrawn
-                const amount = transaction.amount.gross;
-                driverEarnings.earnings.pending -= amount;
-                driverEarnings.earnings.withdrawn += amount;
-                driverEarnings.lifetime.totalWithdrawn += amount;
-
-                // Update payout status in recent payouts
-                const recentPayout = driverEarnings.recentPayouts.find(
-                    p => p.transactionId.toString() === transaction._id.toString()
-                );
-                if (recentPayout) {
-                    recentPayout.status = 'completed';
-                    recentPayout.processedAt = new Date();
-                }
-
-                await driverEarnings.save();
-            }
-
-            console.log(`Transfer successful: ${reference}`);
-            return {success: true, message: 'Transfer completed successfully'};
-
-        } catch (error) {
-            console.error('Error handling transfer success:', error);
-            return {success: false, message: error.message};
-        }
-    }
-
-    /**
-     * Handle transfer webhook - FAILED
-     */
-    static async handleTransferFailed(webhookData) {
-        try {
-            const {FinancialTransaction, DriverEarnings} = await getFinancialModels();
-
-            const reference = webhookData.reference || webhookData.data?.reference;
-
-            // Find the transaction
-            const transaction = await FinancialTransaction.findOne({
-                'gateway.reference': reference,
-                transactionType: 'driver_payout'
-            });
-
-            if (!transaction) {
-                console.error('Transaction not found for reference:', reference);
-                return {success: false, message: 'Transaction not found'};
-            }
-
-            // Update transaction status
-            transaction.status = 'failed';
-            transaction.payout.transferStatus = 'failed';
-            transaction.gateway.metadata.failed_at = webhookData.updatedAt || webhookData.data?.updatedAt || new Date();
-            transaction.gateway.metadata.failure_reason = webhookData.failures || webhookData.data?.failures || 'Transfer failed';
-            transaction.gateway.metadata.webhook_received_at = new Date();
-
-            await transaction.save();
-
-            // Reverse the deduction - refund driver
-            const driverEarnings = await DriverEarnings.findOne({
-                driverId: transaction.driverId
-            });
-
-            if (driverEarnings) {
-                const amount = transaction.amount.gross;
-
-                // Restore available balance
-                driverEarnings.availableBalance += amount;
-                driverEarnings.earnings.available += amount;
-                driverEarnings.earnings.pending -= amount;
-
-                // Update payout status in recent payouts
-                const recentPayout = driverEarnings.recentPayouts.find(
-                    p => p.transactionId.toString() === transaction._id.toString()
-                );
-                if (recentPayout) {
-                    recentPayout.status = 'failed';
-                    recentPayout.processedAt = new Date();
-                }
-
-                await driverEarnings.save();
-            }
-
-            console.log(`Transfer failed and reversed: ${reference}`);
-            return {success: true, message: 'Transfer failed, funds restored'};
-
-        } catch (error) {
-            console.error('Error handling transfer failure:', error);
-            return {success: false, message: error.message};
-        }
-    }
-
-    /**
      * Handle transfer webhook - REVERSED
      */
     static async handleTransferReversed(webhookData) {
@@ -599,29 +712,6 @@ class FinancialService {
         return await FinancialService.handleTransferFailed(webhookData);
     }
 
-
-    /**
-     * Find earnings to mark as withdrawn (FIFO)
-     */
-    static async findEarningsForPayout(driverEarnings, payoutAmount) {
-        const earningsUsed = [];
-        let amountRemaining = payoutAmount;
-
-        // Search through pages (oldest first for FIFO)
-        for (const page of driverEarnings.earningsPages) {
-            for (const earning of page.earnings) {
-                if (earning.status === 'available' && amountRemaining > 0) {
-                    earningsUsed.push(earning.transactionId.toString());
-                    amountRemaining -= earning.amount;
-
-                    if (amountRemaining <= 0) break;
-                }
-            }
-            if (amountRemaining <= 0) break;
-        }
-
-        return earningsUsed;
-    }
 
     /**
      * Distribute order revenue after delivery completion
@@ -1042,6 +1132,588 @@ class FinancialService {
             console.error('Error updating payout from Paystack status:', error);
             throw error;
         }
+    }
+
+    static async getFinancialSummary(driverId) {
+        try {
+            const { DriverEarnings } = await getFinancialModels();
+
+            // TEMPORARY: Get raw document without any transformations
+            const rawDoc = await DriverEarnings.findOne({ driverId })
+                .lean()
+                .exec();
+
+            console.log('RAW DOCUMENT:', {
+                pending: rawDoc.earnings.pending,
+                available: rawDoc.earnings.available,
+                withdrawn: rawDoc.earnings.withdrawn
+            });
+
+            // Method 1: Normal Mongoose query
+            const mongooseDoc = await DriverEarnings.findOne({ driverId });
+            console.log('MONGOOSE DOC - pending:', mongooseDoc.earnings.pending);
+
+            // Method 2: Raw collection query
+            const rawFromCollection = await DriverEarnings.collection.findOne({
+                driverId: new mongoose.Types.ObjectId(driverId)
+            });
+            console.log('RAW COLLECTION - pending:', rawFromCollection.earnings.pending);
+
+            // Method 3: With lean
+            const leanDoc = await DriverEarnings.findOne({ driverId }).lean();
+            console.log('LEAN DOC - pending:', leanDoc.earnings.pending);
+
+            return rawDoc; // Return this temporarily to test
+        } catch (error) {
+            console.error('Error getting financial summary:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Manual reconciliation for stuck transfers
+     */
+    static async reconcilePendingTransfers(driverId) {
+        const { DriverEarnings, FinancialTransaction } = await getFinancialModels();
+
+        const driverEarnings = await DriverEarnings.findOne({ driverId });
+        if (!driverEarnings) {
+            return { success: false, message: 'Driver earnings not found' };
+        }
+
+        const pendingTransfers = driverEarnings.pendingTransfers.filter(
+            pt => pt.status === 'pending' || pt.requiresManualCheck
+        );
+
+        const results = {
+            reconciled: 0,
+            failed: 0,
+            stillPending: 0,
+            details: []
+        };
+
+        for (const pendingTransfer of pendingTransfers) {
+            try {
+                console.log(`Reconciling transfer: ${pendingTransfer.paystackReference}`);
+
+                // Check Paystack status for this reference
+                const paystackStatus = await FinancialService.verifyPaystackTransfer(pendingTransfer.paystackReference);
+
+                if (paystackStatus.success && paystackStatus.data) {
+                    const paystackData = paystackStatus.data;
+
+                    // Update based on Paystack status
+                    switch (paystackData.status) {
+                        case 'success':
+                            await FinancialService.handleTransferSuccess({
+                                reference: pendingTransfer.paystackReference,
+                                data: paystackData
+                            });
+                            results.reconciled++;
+                            results.details.push({
+                                reference: pendingTransfer.paystackReference,
+                                status: 'completed',
+                                message: 'Successfully reconciled from pending to completed'
+                            });
+                            break;
+
+                        case 'failed':
+                            await FinancialService.handleTransferFailed({
+                                reference: pendingTransfer.paystackReference,
+                                data: paystackData
+                            });
+                            results.reconciled++;
+                            results.details.push({
+                                reference: pendingTransfer.paystackReference,
+                                status: 'failed',
+                                message: 'Transfer failed, funds restored'
+                            });
+                            break;
+
+                        default:
+                            // Still processing
+                            pendingTransfer.lastVerifiedAt = new Date();
+                            pendingTransfer.requiresManualCheck = true;
+                            results.stillPending++;
+                            results.details.push({
+                                reference: pendingTransfer.paystackReference,
+                                status: 'still_pending',
+                                message: `Transfer still in ${paystackData.status} state`
+                            });
+                    }
+                } else {
+                    results.failed++;
+                    results.details.push({
+                        reference: pendingTransfer.paystackReference,
+                        status: 'verification_failed',
+                        message: 'Could not verify with Paystack'
+                    });
+                }
+            } catch (error) {
+                console.error(`Error reconciling transfer ${pendingTransfer.paystackReference}:`, error);
+                results.failed++;
+                results.details.push({
+                    reference: pendingTransfer.paystackReference,
+                    status: 'error',
+                    message: error.message
+                });
+            }
+        }
+
+        // Save any updates to pending transfers
+        await driverEarnings.save();
+
+        return {
+            success: true,
+            ...results,
+            totalChecked: pendingTransfers.length
+        };
+    }
+
+    /**
+     * Verify transfer with Paystack
+     */
+    static async verifyPaystackTransfer(reference) {
+        try {
+            const response = await axios.get(
+                `https://api.paystack.co/transfer/verify/${reference}`,
+                {
+                    headers: {
+                        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+                        'Content-Type': 'application/json'
+                    }
+                }
+            );
+
+            return response.data;
+        } catch (error) {
+            console.error('Paystack verification error:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * Get driver's pending transfers for display
+     */
+    static async getPendingTransfers(driverId) {
+        const { DriverEarnings } = await getFinancialModels();
+
+        const driverEarnings = await DriverEarnings.findOne({ driverId });
+        if (!driverEarnings) {
+            return [];
+        }
+
+        return driverEarnings.pendingTransfers
+            .filter(pt => pt.status === 'pending')
+            .sort((a, b) => new Date(b.requestedAt) - new Date(a.requestedAt));
+    }
+
+
+
+
+
+
+    // ============================================
+// MANUAL RECONCILIATION SYSTEM
+// ============================================
+
+    /**
+     * Reconcile specific payout by reference
+     * Call this when webhook hasn't arrived after reasonable time
+     */
+    static async reconcilePayoutByReference(reference) {
+        try {
+            const { FinancialTransaction, DriverEarnings } = await getFinancialModels();
+
+            console.log(`🔍 Reconciling payout: ${reference}`);
+
+            // 1. Get our transaction
+            const transaction = await FinancialTransaction.findOne({
+                'gateway.reference': reference,
+                transactionType: 'driver_payout'
+            });
+
+            if (!transaction) {
+                return {
+                    success: false,
+                    message: 'Transaction not found',
+                    reference
+                };
+            }
+
+            // If already in final state, return current status
+            if (['completed', 'failed', 'reversed'].includes(transaction.status)) {
+                return {
+                    success: true,
+                    message: 'Transaction already in final state',
+                    reference,
+                    status: transaction.status,
+                    alreadyProcessed: true
+                };
+            }
+
+            // 2. Query Paystack for current status
+            let paystackData;
+            try {
+                const response = await axios.get(
+                    `https://api.paystack.co/transfer/verify/${reference}`,
+                    {
+                        headers: {
+                            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+                            'Content-Type': 'application/json'
+                        }
+                    }
+                );
+
+                if (!response.data.status || !response.data.data) {
+                    throw new Error('Invalid Paystack response');
+                }
+
+                paystackData = response.data.data;
+
+            } catch (paystackError) {
+                // If Paystack returns 404, transfer not found yet
+                if (paystackError.response?.status === 404) {
+                    return {
+                        success: false,
+                        message: 'Transfer not yet visible in Paystack system',
+                        reference,
+                        suggestion: 'Wait a few more minutes and try again'
+                    };
+                }
+
+                throw new Error(
+                    `Paystack verification failed: ${
+                        paystackError.response?.data?.message || paystackError.message
+                    }`
+                );
+            }
+
+            // 3. Process based on Paystack status
+            const paystackStatus = paystackData.status;
+            console.log(`📊 Paystack status for ${reference}: ${paystackStatus}`);
+
+            let reconciliationResult;
+
+            switch (paystackStatus) {
+                case 'success':
+                    reconciliationResult = await FinancialService.handleTransferSuccess({
+                        reference,
+                        data: paystackData
+                    });
+                    break;
+
+                case 'failed':
+                    reconciliationResult = await FinancialService.handleTransferFailed({
+                        reference,
+                        data: paystackData
+                    });
+                    break;
+
+                case 'reversed':
+                    reconciliationResult = await FinancialService.handleTransferReversed({
+                        reference,
+                        data: paystackData
+                    });
+                    break;
+
+                case 'pending':
+                case 'processing':
+                case 'otp':
+                case 'queued':
+                    // Still processing - update last verified time
+                    const driverEarnings = await DriverEarnings.findOne({
+                        driverId: transaction.driverId
+                    });
+
+                    if (driverEarnings) {
+                        const pendingTransfer = driverEarnings.pendingTransfers.find(
+                            pt => pt.paystackReference === reference
+                        );
+
+                        if (pendingTransfer) {
+                            pendingTransfer.lastVerifiedAt = new Date();
+                            pendingTransfer.paystackResponse = paystackData;
+                            await driverEarnings.save();
+                        }
+                    }
+
+                    return {
+                        success: true,
+                        message: 'Transfer still processing',
+                        reference,
+                        paystackStatus,
+                        stillPending: true,
+                        suggestion: 'Check again in a few minutes'
+                    };
+
+                default:
+                    return {
+                        success: false,
+                        message: `Unknown Paystack status: ${paystackStatus}`,
+                        reference,
+                        paystackStatus
+                    };
+            }
+
+            return {
+                success: true,
+                message: 'Reconciliation completed',
+                reference,
+                paystackStatus,
+                reconciliationResult
+            };
+
+        } catch (error) {
+            console.error('❌ Reconciliation error:', error);
+            return {
+                success: false,
+                message: error.message,
+                reference,
+                error: error.message
+            };
+        }
+    }
+
+    /**
+     * Reconcile all pending transfers for a driver
+     * Useful for cron job or admin action
+     */
+    static async reconcileAllPendingForDriver(driverId) {
+        try {
+            const { DriverEarnings } = await getFinancialModels();
+
+            const driverEarnings = await DriverEarnings.findOne({ driverId });
+            if (!driverEarnings) {
+                return {
+                    success: false,
+                    message: 'Driver earnings not found'
+                };
+            }
+
+            // Get all pending transfers
+            const pendingTransfers = driverEarnings.pendingTransfers.filter(
+                pt => pt.status === 'pending'
+            );
+
+            if (pendingTransfers.length === 0) {
+                return {
+                    success: true,
+                    message: 'No pending transfers to reconcile',
+                    count: 0
+                };
+            }
+
+            console.log(`🔄 Reconciling ${pendingTransfers.length} pending transfers for driver ${driverId}`);
+
+            const results = {
+                total: pendingTransfers.length,
+                completed: 0,
+                failed: 0,
+                stillPending: 0,
+                errors: 0,
+                details: []
+            };
+
+            // Process each pending transfer
+            for (const pendingTransfer of pendingTransfers) {
+                const result = await FinancialService.reconcilePayoutByReference(
+                    pendingTransfer.paystackReference
+                );
+
+                if (result.success) {
+                    if (result.alreadyProcessed) {
+                        results.completed++;
+                    } else if (result.stillPending) {
+                        results.stillPending++;
+                    } else if (result.paystackStatus === 'success') {
+                        results.completed++;
+                    } else if (result.paystackStatus === 'failed' || result.paystackStatus === 'reversed') {
+                        results.failed++;
+                    }
+                } else {
+                    results.errors++;
+                }
+
+                results.details.push({
+                    reference: pendingTransfer.paystackReference,
+                    amount: pendingTransfer.requestedAmount,
+                    result: result
+                });
+
+                // Add small delay between API calls to avoid rate limiting
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+
+            console.log('✅ Reconciliation complete:', results);
+
+            return {
+                success: true,
+                message: 'Reconciliation completed',
+                results
+            };
+
+        } catch (error) {
+            console.error('❌ Error reconciling pending transfers:', error);
+            return {
+                success: false,
+                message: error.message
+            };
+        }
+    }
+
+    /**
+     * Reconcile ALL stuck transfers across all drivers
+     * Run this as a cron job every 30 minutes
+     */
+    static async reconcileAllStuckTransfers(olderThanMinutes = 30) {
+        try {
+            const { DriverEarnings } = await getFinancialModels();
+
+            const cutoffTime = new Date(Date.now() - olderThanMinutes * 60 * 1000);
+
+            // Find all drivers with old pending transfers
+            const driversWithStuck = await DriverEarnings.find({
+                'pendingTransfers': {
+                    $elemMatch: {
+                        status: 'pending',
+                        requestedAt: { $lt: cutoffTime }
+                    }
+                }
+            });
+
+            console.log(`🔍 Found ${driversWithStuck.length} drivers with stuck transfers`);
+
+            const results = {
+                driversProcessed: 0,
+                totalTransfers: 0,
+                completed: 0,
+                failed: 0,
+                stillPending: 0,
+                errors: 0
+            };
+
+            for (const driverEarning of driversWithStuck) {
+                console.log(`Processing driver: ${driverEarning.driverId}`);
+
+                const driverResult = await FinancialService.reconcileAllPendingForDriver(
+                    driverEarning.driverId
+                );
+
+                if (driverResult.success && driverResult.results) {
+                    results.driversProcessed++;
+                    results.totalTransfers += driverResult.results.total;
+                    results.completed += driverResult.results.completed;
+                    results.failed += driverResult.results.failed;
+                    results.stillPending += driverResult.results.stillPending;
+                    results.errors += driverResult.results.errors;
+                }
+
+                // Delay between drivers
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+
+            console.log('✅ Global reconciliation complete:', results);
+
+            return {
+                success: true,
+                message: 'Global reconciliation completed',
+                results
+            };
+
+        } catch (error) {
+            console.error('❌ Error in global reconciliation:', error);
+            return {
+                success: false,
+                message: error.message
+            };
+        }
+    }
+
+    /**
+     * Get reconciliation report for a driver
+     */
+    static async getReconciliationReport(driverId) {
+        try {
+            const { DriverEarnings, FinancialTransaction } = await getFinancialModels();
+
+            const driverEarnings = await DriverEarnings.findOne({ driverId });
+            if (!driverEarnings) {
+                return { success: false, message: 'Driver not found' };
+            }
+
+            // Get all payout transactions
+            const allPayouts = await FinancialTransaction.find({
+                driverId,
+                transactionType: 'driver_payout'
+            }).sort({ createdAt: -1 });
+
+            // Categorize
+            const pending = driverEarnings.pendingTransfers.filter(pt => pt.status === 'pending');
+            const completed = allPayouts.filter(p => p.status === 'completed');
+            const failed = allPayouts.filter(p => p.status === 'failed' || p.status === 'reversed');
+
+            // Calculate totals
+            const pendingAmount = pending.reduce((sum, pt) => sum + pt.requestedAmount, 0);
+            const completedAmount = completed.reduce((sum, tx) => sum + tx.amount.gross, 0);
+            const failedAmount = failed.reduce((sum, tx) => sum + tx.amount.gross, 0);
+
+            // Check for discrepancies
+            const expectedAvailable =
+                driverEarnings.earnings.available + pendingAmount;
+            const actualAvailable = driverEarnings.availableBalance;
+
+            const discrepancy = Math.abs(expectedAvailable - actualAvailable);
+            const hasDiscrepancy = discrepancy > 1; // Allow 1 NGN rounding error
+
+            return {
+                success: true,
+                report: {
+                    summary: {
+                        availableBalance: driverEarnings.availableBalance,
+                        pendingCount: pending.length,
+                        pendingAmount,
+                        completedCount: completed.length,
+                        completedAmount,
+                        failedCount: failed.length,
+                        failedAmount,
+                        totalWithdrawn: driverEarnings.lifetime.totalWithdrawn
+                    },
+                    integrity: {
+                        hasDiscrepancy,
+                        discrepancy,
+                        expectedAvailable,
+                        actualAvailable,
+                        status: hasDiscrepancy ? 'NEEDS_REVIEW' : 'OK'
+                    },
+                    pending: pending.map(pt => ({
+                        reference: pt.paystackReference,
+                        amount: pt.requestedAmount,
+                        requestedAt: pt.requestedAt,
+                        ageMinutes: Math.round(
+                            (Date.now() - new Date(pt.requestedAt).getTime()) / 60000
+                        ),
+                        requiresManualCheck: pt.requiresManualCheck
+                    })),
+                    recentActivity: driverEarnings.recentPayouts.slice(0, 5)
+                }
+            };
+
+        } catch (error) {
+            console.error('Error generating reconciliation report:', error);
+            return { success: false, message: error.message };
+        }
+    }
+
+    static formatAge(milliseconds) {
+        const minutes = Math.floor(milliseconds / 60000);
+        const hours = Math.floor(minutes / 60);
+        const days = Math.floor(hours / 24);
+
+        if (days > 0) return `${days} day${days > 1 ? 's' : ''} ago`;
+        if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
+        if (minutes > 0) return `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
+        return 'Just now';
     }
 }
 

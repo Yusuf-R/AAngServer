@@ -5681,7 +5681,7 @@ class DriverController {
         }
 
         const { userData } = preCheckResult;
-        const { page = 1, limit = 20, type, status } = req.query;
+        const { page = 1, limit = 50, type, status } = req.query;
 
         const driverId = userData._id;
 
@@ -5786,7 +5786,7 @@ class DriverController {
         }
     }
 
-    static async verifyPayout(req, res) {
+    static async oldVerifyPayout(req, res) {
         const preCheckResult = await AuthController.apiPreCheck(req);
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
@@ -6467,6 +6467,385 @@ class DriverController {
             return 50;
         }
     }
+
+
+        /**
+     * Manual reconciliation endpoint - Driver can trigger
+     * GET /api/driver/payouts/reconcile/:payoutId
+     */
+    static async verifyPayout(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { payoutId } = req.query;
+
+        if (!payoutId) {
+            return res.status(404).json({
+                success: false,
+                message: 'PayoutId not found'
+            });
+        }
+
+        try {
+            const { FinancialTransaction } = await getFinancialModels();
+
+            // Get transaction
+            const transaction = await FinancialTransaction.findById(payoutId);
+
+            if (!transaction) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Payout not found'
+                });
+            }
+
+            // Verify ownership
+            if (transaction.driverId.toString() !== userData._id.toString()) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Unauthorized'
+                });
+            }
+
+            // Perform reconciliation
+            const result = await FinancialService.reconcilePayoutByReference(
+                transaction.gateway.reference
+            );
+
+            res.status(200).json({
+                success: result.success,
+                message: result.message,
+                payout: {
+                    _id: transaction._id,
+                    status: result.paystackStatus || transaction.status,
+                    reference: transaction.gateway.reference,
+                    amount: transaction.amount,
+                    paystackStatus: result.paystackStatus,
+                    stillPending: result.stillPending,
+                    suggestion: result.suggestion
+                }
+            });
+
+        } catch (error) {
+            console.error('Error reconciling payout:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Failed to reconcile payout'
+            });
+        }
+    }
+
+    /**
+     * Manual reconciliation endpoint - Driver can trigger
+     * GET /api/driver/payouts/reconcile/:payoutId
+     */
+    static async reconcilePayout(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { payoutId } = req.params;
+
+        try {
+            const { FinancialTransaction } = await getFinancialModels();
+
+            // Get transaction
+            const transaction = await FinancialTransaction.findById(payoutId);
+
+            if (!transaction) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Payout not found'
+                });
+            }
+
+            // Verify ownership
+            if (transaction.driverId.toString() !== userData._id.toString()) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Unauthorized'
+                });
+            }
+
+            // Perform reconciliation
+            const result = await FinancialService.reconcilePayoutByReference(
+                transaction.gateway.reference
+            );
+
+            res.status(200).json({
+                success: result.success,
+                message: result.message,
+                payout: {
+                    _id: transaction._id,
+                    status: result.paystackStatus || transaction.status,
+                    reference: transaction.gateway.reference,
+                    amount: transaction.amount,
+                    paystackStatus: result.paystackStatus,
+                    stillPending: result.stillPending,
+                    suggestion: result.suggestion
+                }
+            });
+
+        } catch (error) {
+            console.error('Error reconciling payout:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Failed to reconcile payout'
+            });
+        }
+    }
+
+    /**
+     * Get reconciliation report for driver
+     * GET /api/driver/payouts/report
+     */
+    static async getPayoutReport(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+
+        try {
+            const report = await FinancialService.getReconciliationReport(
+                userData._id
+            );
+
+            res.status(200).json(report);
+
+        } catch (error) {
+            console.error('Error getting payout report:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Failed to get payout report'
+            });
+        }
+    }
+
+    /**
+     * Get pending payouts with age
+     * GET /api/driver/payouts/pending
+     */
+    static async getPendingPayouts(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+
+        try {
+            const { DriverEarnings } = await getFinancialModels();
+
+            const driverEarnings = await DriverEarnings.findOne({
+                driverId: userData._id
+            });
+
+            if (!driverEarnings) {
+                return res.status(200).json({
+                    success: true,
+                    pending: []
+                });
+            }
+
+            const now = Date.now();
+            const pending = driverEarnings.pendingTransfers
+                .filter(pt => pt.status === 'pending')
+                .map(pt => ({
+                    transactionId: pt.transactionId,
+                    reference: pt.paystackReference,
+                    amount: pt.requestedAmount,
+                    netAmount: pt.netAmount,
+                    requestedAt: pt.requestedAt,
+                    ageMinutes: Math.round(
+                        (now - new Date(pt.requestedAt).getTime()) / 60000
+                    ),
+                    ageFormatted: FinancialService.formatAge(
+                        now - new Date(pt.requestedAt).getTime()
+                    ),
+                    canReconcile: (now - new Date(pt.requestedAt).getTime()) > 5 * 60 * 1000, // After 5 min
+                    bankDetails: pt.bankDetails
+                }))
+                .sort((a, b) => new Date(b.requestedAt) - new Date(a.requestedAt));
+
+            res.status(200).json({
+                success: true,
+                pending,
+                count: pending.length,
+                totalAmount: pending.reduce((sum, p) => sum + p.amount, 0)
+            });
+
+        } catch (error) {
+            console.error('Error getting pending payouts:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Failed to get pending payouts'
+            });
+        }
+    }
+
+// ============================================
+// ADMIN CONTROLLER - SYSTEM-WIDE RECONCILIATION
+// ============================================
+
+    /**
+     * Admin endpoint to reconcile all stuck transfers
+     * POST /api/admin/payouts/reconcile-stuck
+     */
+    static async reconcileAllStuck(req, res) {
+        // Check admin auth (implement your admin check)
+        const { olderThanMinutes = 30 } = req.body;
+
+        try {
+            const result = await FinancialService.reconcileAllStuckTransfers(
+                olderThanMinutes
+            );
+
+            res.status(200).json(result);
+
+        } catch (error) {
+            console.error('Error reconciling stuck transfers:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Failed to reconcile stuck transfers'
+            });
+        }
+    }
+
+    /**
+     * Admin endpoint to get system-wide payout health
+     * GET /api/admin/payouts/health
+     */
+    static async getPayoutSystemHealth(req, res) {
+        try {
+            const { DriverEarnings, FinancialTransaction } = await getFinancialModels();
+
+            // Get all pending transfers
+            const driversWithPending = await DriverEarnings.find({
+                'pendingTransfers.status': 'pending'
+            });
+
+            const now = Date.now();
+            let totalPending = 0;
+            let oldPending = 0;
+            let veryOldPending = 0;
+            let totalPendingAmount = 0;
+
+            driversWithPending.forEach(driver => {
+                driver.pendingTransfers.forEach(pt => {
+                    if (pt.status === 'pending') {
+                        totalPending++;
+                        totalPendingAmount += pt.requestedAmount;
+
+                        const age = now - new Date(pt.requestedAt).getTime();
+                        if (age > 30 * 60 * 1000) oldPending++; // > 30 min
+                        if (age > 2 * 60 * 60 * 1000) veryOldPending++; // > 2 hours
+                    }
+                });
+            });
+
+            // Get transaction stats
+            const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+            const recentPayouts = await FinancialTransaction.countDocuments({
+                transactionType: 'driver_payout',
+                createdAt: { $gte: last24h }
+            });
+
+            const completedPayouts = await FinancialTransaction.countDocuments({
+                transactionType: 'driver_payout',
+                status: 'completed',
+                createdAt: { $gte: last24h }
+            });
+
+            const failedPayouts = await FinancialTransaction.countDocuments({
+                transactionType: 'driver_payout',
+                status: { $in: ['failed', 'reversed'] },
+                createdAt: { $gte: last24h }
+            });
+
+            const health = {
+                healthy: veryOldPending === 0 && oldPending < 5,
+                pending: {
+                    total: totalPending,
+                    old: oldPending, // > 30 min
+                    veryOld: veryOldPending, // > 2 hours
+                    totalAmount: totalPendingAmount,
+                    driversAffected: driversWithPending.length
+                },
+                last24h: {
+                    total: recentPayouts,
+                    completed: completedPayouts,
+                    failed: failedPayouts,
+                    successRate: recentPayouts > 0
+                        ? ((completedPayouts / recentPayouts) * 100).toFixed(2) + '%'
+                        : 'N/A'
+                },
+                recommendations: []
+            };
+
+            if (veryOldPending > 0) {
+                health.recommendations.push(
+                    `${veryOldPending} transfers are stuck for over 2 hours - run reconciliation immediately`
+                );
+            }
+
+            if (oldPending > 5) {
+                health.recommendations.push(
+                    `${oldPending} transfers are pending for over 30 minutes - consider reconciliation`
+                );
+            }
+
+            res.status(200).json({
+                success: true,
+                health,
+                timestamp: new Date()
+            });
+
+        } catch (error) {
+            console.error('Error getting payout system health:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Failed to get system health'
+            });
+        }
+    }
+
+    // ============================================
+    // UTILITY HELPERS
+    // ============================================
+
+    /**
+     * Format age in human-readable format
+     */
+    static formatAge(milliseconds) {
+        const minutes = Math.floor(milliseconds / 60000);
+        const hours = Math.floor(minutes / 60);
+        const days = Math.floor(hours / 24);
+
+        if (days > 0) return `${days} day${days > 1 ? 's' : ''} ago`;
+        if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
+        if (minutes > 0) return `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
+        return 'Just now';
+    }
+
 
 
 
