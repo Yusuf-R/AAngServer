@@ -38,6 +38,7 @@ driverRouter.post('/auth/password/reset', driverController.resetPassword);
 // data validation
 driverRouter.get('/verification/status', driverController.verificationStatus);
 driverRouter.patch('/verification/submit', driverController.submitVerification);
+driverRouter.patch('/verification/migrate', driverController.migrateExistingDriverVerifications);
 // chat
 driverRouter.post('/support/chat/message/send', chatController.sendMessage);
 driverRouter.post('/support/chat/get-or-create', chatController.getOrCreateDriverSupportConversation);

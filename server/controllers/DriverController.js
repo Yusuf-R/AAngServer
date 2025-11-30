@@ -1738,6 +1738,685 @@ class DriverController {
         }
     }
 
+    /**
+     * Submit verification update request
+     * POST /api/driver/verification/submit-update
+     */
+    /**
+     * Submit verification update request
+     * POST /api/driver/verification/submit-update
+     */
+    static async submitVerificationUpdate(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+
+        try {
+            const { Driver } = await getModels();
+            const driver = await Driver.findById(userData._id);
+
+            if (!driver) {
+                return res.status(404).json({ message: 'Driver not found' });
+            }
+
+            // Check if driver is approved
+            if (driver.verification.overallStatus !== 'approved') {
+                return res.status(400).json({
+                    error: 'Only approved drivers can request updates'
+                });
+            }
+
+            // Check if there's already a pending update
+            if (driver.verification.pendingUpdate?.exists) {
+                return res.status(400).json({
+                    error: 'You already have a pending update request under review'
+                });
+            }
+
+            const { basicInfo, specificDocs } = req.body;
+
+            if (!basicInfo || !specificDocs) {
+                return res.status(400).json({
+                    error: 'Missing required fields: basicInfo and specificDocs are required'
+                });
+            }
+
+            // Get current active data for comparison
+            const currentBasic = driver.verification.activeData.basicVerification;
+            const currentVehicle = driver.verification.activeData.vehicleDetails;
+
+            // ============================================
+            // CALCULATE CHANGES SUMMARY
+            // ============================================
+            const changesSummary = {
+                vehicleTypeChange: null,
+                locationChange: null,
+                documentsUpdated: [],
+                bankAccountsChanged: false,
+                identificationChanged: false,
+                totalChanges: 0
+            };
+
+            // Vehicle type change
+            if (basicInfo.vehicleType !== currentVehicle.type) {
+                changesSummary.vehicleTypeChange = {
+                    from: currentVehicle.type,
+                    to: basicInfo.vehicleType
+                };
+                changesSummary.totalChanges++;
+                changesSummary.documentsUpdated.push('vehicle_type');
+            }
+
+            // Location change
+            if (basicInfo.operationalArea.state !== currentBasic.operationalArea?.state ||
+                basicInfo.operationalArea.lga !== currentBasic.operationalArea?.lga) {
+                changesSummary.locationChange = {
+                    from: {
+                        state: currentBasic.operationalArea?.state,
+                        lga: currentBasic.operationalArea?.lga
+                    },
+                    to: {
+                        state: basicInfo.operationalArea.state,
+                        lga: basicInfo.operationalArea.lga
+                    }
+                };
+                changesSummary.totalChanges++;
+            }
+
+            // Identification change
+            if (basicInfo.identification.number !== currentBasic.identification?.number ||
+                basicInfo.identification.type !== currentBasic.identification?.type) {
+                changesSummary.identificationChanged = true;
+                changesSummary.documentsUpdated.push('identification');
+                changesSummary.totalChanges++;
+            }
+
+            // Bank accounts change
+            const currentAccountsStr = JSON.stringify(currentBasic.bankAccounts || []);
+            const proposedAccountsStr = JSON.stringify(basicInfo.bankAccounts || []);
+            if (currentAccountsStr !== proposedAccountsStr) {
+                changesSummary.bankAccountsChanged = true;
+                changesSummary.totalChanges++;
+            }
+
+            // ============================================
+            // DETERMINE UPDATE TYPE
+            // ============================================
+            let updateType = 'comprehensive_update';
+            if (changesSummary.vehicleTypeChange) {
+                const hierarchy = ['bicycle', 'motorcycle', 'tricycle', 'car', 'van', 'truck'];
+                const fromIndex = hierarchy.indexOf(changesSummary.vehicleTypeChange.from);
+                const toIndex = hierarchy.indexOf(changesSummary.vehicleTypeChange.to);
+                updateType = toIndex > fromIndex ? 'vehicle_upgrade' : 'vehicle_downgrade';
+            } else if (changesSummary.locationChange && changesSummary.totalChanges === 1) {
+                updateType = 'location_change';
+            } else if (changesSummary.bankAccountsChanged && changesSummary.totalChanges === 1) {
+                updateType = 'bank_account_change';
+            } else if (changesSummary.documentsUpdated.length > 0 && changesSummary.totalChanges === 1) {
+                updateType = 'document_renewal';
+            }
+
+            // ============================================
+            // BUILD PROPOSED BASIC VERIFICATION
+            // ============================================
+            const proposedBasicVerification = {
+                identification: {
+                    type: basicInfo.identification.type,
+                    number: basicInfo.identification.number,
+                    expiryDate: DriverController.parseDate(basicInfo.identification.expiry),
+                    frontImageUrl: basicInfo.identification.frontImage,
+                    backImageUrl: basicInfo.identification.backImage || null,
+                    verified: false,
+                    status: 'pending'
+                },
+                passportPhoto: {
+                    imageUrl: basicInfo.passportPhoto,
+                    uploadedAt: new Date(),
+                    verified: false,
+                    status: 'pending'
+                },
+                operationalArea: {
+                    state: basicInfo.operationalArea.state,
+                    lga: basicInfo.operationalArea.lga,
+                    verified: false
+                },
+                bankAccounts: basicInfo.bankAccounts?.map(account => ({
+                    accountName: account.accountName,
+                    accountNumber: account.accountNumber,
+                    bankName: account.bankName,
+                    bankCode: account.bankCode,
+                    isPrimary: account.isPrimary || false,
+                    verified: false,
+                    addedAt: new Date()
+                })) || [],
+                isComplete: true,
+                completedAt: new Date()
+            };
+
+            // ============================================
+            // BUILD PROPOSED VEHICLE DETAILS
+            // ============================================
+            const proposedVehicleDetails = {
+                type: basicInfo.vehicleType,
+                plateNumber: specificDocs.plateNumber || null,
+                model: specificDocs.model || null,
+                year: specificDocs.year ? parseInt(specificDocs.year) : null,
+                color: specificDocs.color || null,
+                capacity: specificDocs.capacity || {
+                    weight: 0,
+                    volume: 0,
+                    passengers: 0
+                }
+            };
+
+            // ============================================
+            // BUILD PROPOSED SPECIFIC VERIFICATION
+            // (Reuse your exact logic from submitVerification)
+            // ============================================
+            const isLagosDriver = basicInfo.operationalArea.state?.toLowerCase() === 'lagos';
+            const vehicleType = basicInfo.vehicleType;
+
+            const proposedSpecificVerification = {
+                activeVerificationType: DriverController.getVerificationType(vehicleType),
+                isComplete: true,
+                completedAt: new Date()
+            };
+
+            // Populate based on vehicle type (EXACT COPY from submitVerification)
+            switch (vehicleType) {
+                case 'bicycle':
+                    proposedSpecificVerification.bicycle = {
+                        hasHelmet: specificDocs.hasHelmet || false,
+                        helmetNote: specificDocs.hasHelmet ? null : 'Driver advised to get helmet for safety',
+                        backpackEvidence: {
+                            imageUrl: specificDocs.backpackEvidence,
+                            uploadedAt: new Date(),
+                            verified: false,
+                            status: 'submitted'
+                        },
+                        bicyclePictures: {
+                            front: {
+                                imageUrl: specificDocs.bicyclePictures?.front,
+                                uploadedAt: new Date()
+                            },
+                            rear: {
+                                imageUrl: specificDocs.bicyclePictures?.rear,
+                                uploadedAt: new Date()
+                            },
+                            side: {
+                                imageUrl: specificDocs.bicyclePictures?.side,
+                                uploadedAt: new Date()
+                            },
+                            verified: false
+                        }
+                    };
+                    break;
+
+                case 'tricycle':
+                    proposedSpecificVerification.tricycle = {
+                        pictures: {
+                            front: {
+                                imageUrl: specificDocs.pictures?.front,
+                                uploadedAt: new Date()
+                            },
+                            rear: {
+                                imageUrl: specificDocs.pictures?.rear,
+                                uploadedAt: new Date()
+                            },
+                            side: {
+                                imageUrl: specificDocs.pictures?.side,
+                                uploadedAt: new Date()
+                            },
+                            inside: {
+                                imageUrl: specificDocs.pictures?.inside,
+                                uploadedAt: new Date()
+                            },
+                            verified: false
+                        },
+                        driversLicense: {
+                            number: specificDocs.driversLicense?.number,
+                            expiryDate: DriverController.parseDate(specificDocs.driversLicense?.expiryDate),
+                            imageUrl: specificDocs.driversLicense?.imageUrl,
+                            verified: false,
+                            status: 'submitted'
+                        },
+                        ...(isLagosDriver && {
+                            hackneyPermit: {
+                                number: specificDocs.hackneyPermit?.number,
+                                expiryDate: DriverController.parseDate(specificDocs.hackneyPermit?.expiryDate),
+                                imageUrl: specificDocs.hackneyPermit?.imageUrl,
+                                verified: false,
+                                required: true
+                            },
+                            lasdriCard: {
+                                number: specificDocs.lasdriCard?.number,
+                                expiryDate: DriverController.parseDate(specificDocs.lasdriCard?.expiryDate),
+                                imageUrl: specificDocs.lasdriCard?.imageUrl,
+                                verified: false,
+                                required: true
+                            }
+                        })
+                    };
+                    break;
+
+                case 'motorcycle':
+                    proposedSpecificVerification.motorcycle = {
+                        pictures: {
+                            front: {
+                                imageUrl: specificDocs.pictures?.front,
+                                uploadedAt: new Date()
+                            },
+                            rear: {
+                                imageUrl: specificDocs.pictures?.rear,
+                                uploadedAt: new Date()
+                            },
+                            side: {
+                                imageUrl: specificDocs.pictures?.side,
+                                uploadedAt: new Date()
+                            },
+                            verified: false
+                        },
+                        ridersPermit: {
+                            cardNumber: specificDocs.ridersPermit?.cardNumber,
+                            expiryDate: DriverController.parseDate(specificDocs.ridersPermit?.expiryDate),
+                            imageUrl: specificDocs.ridersPermit?.imageUrl,
+                            issuingOffice: specificDocs.ridersPermit?.issuingOffice,
+                            verified: false,
+                            status: 'submitted'
+                        },
+                        commercialLicense: {
+                            licenseNumber: specificDocs.commercialLicense?.licenseNumber,
+                            class: specificDocs.commercialLicense?.class || 'A',
+                            expiryDate: DriverController.parseDate(specificDocs.commercialLicense?.expiryDate),
+                            imageUrl: specificDocs.commercialLicense?.imageUrl,
+                            verified: false,
+                            status: 'submitted'
+                        },
+                        proofOfAddress: {
+                            documentType: specificDocs.proofOfAddress?.documentType || 'utility_bill',
+                            imageUrl: specificDocs.proofOfAddress?.imageUrl,
+                            uploadedAt: new Date(),
+                            verified: false
+                        },
+                        proofOfOwnership: {
+                            documentType: specificDocs.proofOfOwnership?.documentType || 'receipt',
+                            imageUrl: specificDocs.proofOfOwnership?.imageUrl,
+                            uploadedAt: new Date(),
+                            verified: false
+                        },
+                        roadWorthiness: {
+                            certificateNumber: specificDocs.roadWorthiness?.certificateNumber,
+                            expiryDate: DriverController.parseDate(specificDocs.roadWorthiness?.expiryDate),
+                            imageUrl: specificDocs.roadWorthiness?.imageUrl,
+                            verified: false
+                        },
+                        ...(specificDocs.bvnNumber?.number && {
+                            bvnNumber: {
+                                number: specificDocs.bvnNumber.number,
+                                verified: false,
+                                optional: true
+                            }
+                        }),
+                        ...(isLagosDriver && {
+                            hackneyPermit: {
+                                number: specificDocs.hackneyPermit?.number,
+                                expiryDate: DriverController.parseDate(specificDocs.hackneyPermit?.expiryDate),
+                                imageUrl: specificDocs.hackneyPermit?.imageUrl,
+                                verified: false,
+                                required: true
+                            },
+                            lasdriCard: {
+                                number: specificDocs.lasdriCard?.number,
+                                expiryDate: DriverController.parseDate(specificDocs.lasdriCard?.expiryDate),
+                                imageUrl: specificDocs.lasdriCard?.imageUrl,
+                                verified: false,
+                                required: true
+                            }
+                        })
+                    };
+                    break;
+
+                case 'car':
+                case 'van':
+                case 'truck':
+                    proposedSpecificVerification.vehicle = {
+                        pictures: {
+                            front: {
+                                imageUrl: specificDocs.pictures?.front,
+                                uploadedAt: new Date()
+                            },
+                            rear: {
+                                imageUrl: specificDocs.pictures?.rear,
+                                uploadedAt: new Date()
+                            },
+                            side: {
+                                imageUrl: specificDocs.pictures?.side,
+                                uploadedAt: new Date()
+                            },
+                            inside: {
+                                imageUrl: specificDocs.pictures?.inside,
+                                uploadedAt: new Date()
+                            },
+                            verified: false
+                        },
+                        driversLicense: {
+                            number: specificDocs.driversLicense?.number,
+                            class: specificDocs.driversLicense?.class,
+                            expiryDate: DriverController.parseDate(specificDocs.driversLicense?.expiryDate),
+                            imageUrl: specificDocs.driversLicense?.imageUrl,
+                            verified: false,
+                            status: 'submitted'
+                        },
+                        vehicleRegistration: {
+                            registrationNumber: specificDocs.vehicleRegistration?.registrationNumber,
+                            expiryDate: DriverController.parseDate(specificDocs.vehicleRegistration?.expiryDate),
+                            imageUrl: specificDocs.vehicleRegistration?.imageUrl,
+                            verified: false,
+                            status: 'submitted'
+                        },
+                        insurance: {
+                            policyNumber: specificDocs.insurance?.policyNumber,
+                            provider: specificDocs.insurance?.provider,
+                            expiryDate: DriverController.parseDate(specificDocs.insurance?.expiryDate),
+                            imageUrl: specificDocs.insurance?.imageUrl,
+                            verified: false,
+                            status: 'submitted'
+                        },
+                        roadWorthiness: {
+                            certificateNumber: specificDocs.roadWorthiness?.certificateNumber,
+                            expiryDate: DriverController.parseDate(specificDocs.roadWorthiness?.expiryDate),
+                            imageUrl: specificDocs.roadWorthiness?.imageUrl,
+                            verified: false,
+                            status: 'submitted'
+                        },
+                        ...(isLagosDriver && {
+                            hackneyPermit: {
+                                number: specificDocs.hackneyPermit?.number,
+                                expiryDate: DriverController.parseDate(specificDocs.hackneyPermit?.expiryDate),
+                                imageUrl: specificDocs.hackneyPermit?.imageUrl,
+                                verified: false,
+                                required: true
+                            },
+                            lasdriCard: {
+                                number: specificDocs.lasdriCard?.number,
+                                expiryDate: DriverController.parseDate(specificDocs.lasdriCard?.expiryDate),
+                                imageUrl: specificDocs.lasdriCard?.imageUrl,
+                                verified: false,
+                                required: true
+                            }
+                        })
+                    };
+                    break;
+
+                default:
+                    return res.status(400).json({
+                        error: 'Invalid vehicle type provided'
+                    });
+            }
+
+            // ============================================
+            // CREATE PENDING UPDATE
+            // ============================================
+            driver.verification.pendingUpdate = {
+                exists: true,
+                status: 'pending_review',
+                submittedAt: new Date(),
+                updateType,
+                proposedChanges: {
+                    basicVerification: proposedBasicVerification,
+                    specificVerification: proposedSpecificVerification,
+                    vehicleDetails: proposedVehicleDetails
+                },
+                changesSummary,
+                autoExpireAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days
+            };
+
+            // Save driver (overallStatus remains 'approved')
+            await driver.save();
+
+            const dashboardData = await DriverController.userDashBoardData(driver);
+            if (!dashboardData) {
+                return res.status(404).json({ error: "Dashboard data not found" });
+            }
+
+            // TODO: Send notification to admins
+            // TODO: Send confirmation SMS/email to driver
+
+            return res.status(200).json({
+                success: true,
+                message: 'Update request submitted successfully. Your current verification remains active.',
+                dashboardData,
+                pendingUpdate: {
+                    updateType,
+                    submittedAt: driver.verification.pendingUpdate.submittedAt,
+                    changesSummary
+                }
+            });
+
+        } catch (error) {
+            console.log("Update submission error:", error);
+            return res.status(500).json({
+                error: "An error occurred while submitting update",
+                message: error.message
+            });
+        }
+    }
+
+    /**
+     * Migrate existing driver data to new structure
+     * Run this once to populate activeData from existing verification data
+     */
+    static async migrateExistingDriverVerifications(req, res) {
+        const { Driver } = await getModels();
+
+        const approvedDrivers = await Driver.find({
+            'verification.overallStatus': 'approved'
+        });
+
+        console.log(`Migrating ${approvedDrivers.length} approved drivers...`);
+
+       try {
+           for (const driver of approvedDrivers) {
+               const v = driver.verification;
+
+               driver.verification.activeData = {
+                   basicVerification: v.basicVerification
+                       ? JSON.parse(JSON.stringify(v.basicVerification))
+                       : {},
+                   specificVerification: v.specificVerification
+                       ? JSON.parse(JSON.stringify(v.specificVerification))
+                       : {},
+                   vehicleDetails: {
+                       type: driver.vehicleDetails?.type,
+                       plateNumber: driver.vehicleDetails?.plateNumber,
+                       model: driver.vehicleDetails?.model,
+                       year: driver.vehicleDetails?.year,
+                       color: driver.vehicleDetails?.color,
+                       capacity: driver.vehicleDetails?.capacity
+                   },
+                   approvedAt: v.verificationDate || new Date(),
+                   approvedBy: v.verifiedBy
+               };
+
+               driver.verification.pendingUpdate = {
+                   exists: false,
+                   status: null,
+                   proposedChanges: {},
+                   changesSummary: {}
+               };
+
+               driver.verification.updateHistory = driver.verification.updateHistory || [];
+
+               await driver.save();
+           }
+
+           console.log('Migration complete!');
+           return res.status(200).json({
+               success: true,
+               message: 'Verification documents submitted successfully',
+           });
+       } catch(err) {
+           console.log(err);
+           return res.status(500).json({
+               success: false,
+               message: 'An error occurred while migrating verification documents',
+           });
+       }
+    }
+
+    /**
+     * POST /api/driver/verification/initiate-update
+     * Check if driver can initiate an update
+     */
+    static async initiateVerificationUpdate(req, res) {
+        try {
+            const driverId = req.user._id;
+            const { Driver } = await getModels();
+
+            const driver = await Driver.findById(driverId);
+
+            // Validation checks
+            if (driver.verification.overallStatus !== 'approved') {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Only approved drivers can request updates'
+                });
+            }
+
+            if (driver.verification.pendingUpdate?.status === 'pending_review') {
+                return res.status(400).json({
+                    success: false,
+                    message: 'You already have a pending update request under review'
+                });
+            }
+
+            // Return current active data for editing
+            return res.status(200).json({
+                success: true,
+                message: 'You can proceed with update',
+                currentData: {
+                    basicVerification: driver.verification.activeData.basicVerification,
+                    specificVerification: driver.verification.activeData.specificVerification
+                }
+            });
+
+        } catch (error) {
+            console.error('Error initiating update:', error);
+            return res.status(500).json({
+                success: false,
+                message: 'Failed to initiate update'
+            });
+        }
+    }
+
+    /**
+     * POST /api/admin/verification/review-update/:driverId
+     * Admin reviews and approves/rejects update
+     */
+    static async reviewDriverUpdate(req, res) {
+        try {
+            const { driverId } = req.params;
+            const { action, feedback } = req.body; // action: 'approve' | 'reject'
+            const adminId = req.admin._id;
+            const { Driver } = await getModels();
+
+            const driver = await Driver.findById(driverId);
+
+            if (!driver.verification.pendingUpdate || driver.verification.pendingUpdate.status !== 'pending_review') {
+                return res.status(400).json({
+                    success: false,
+                    message: 'No pending update to review'
+                });
+            }
+
+            if (action === 'approve') {
+                // Save current activeData to history
+                driver.verification.updateHistory.push({
+                    updatedAt: new Date(),
+                    updateType: driver.verification.pendingUpdate.updateType,
+                    status: 'approved',
+                    changes: driver.verification.pendingUpdate.changesSummary,
+                    reviewedBy: adminId,
+                    feedback,
+                    previousData: driver.verification.activeData
+                });
+
+                // Move proposed changes to activeData
+                driver.verification.activeData = {
+                    basicVerification: driver.verification.pendingUpdate.proposedChanges.basicVerification,
+                    specificVerification: driver.verification.pendingUpdate.proposedChanges.specificVerification,
+                    approvedAt: new Date(),
+                    approvedBy: adminId
+                };
+
+                // Update vehicle type at root level if changed
+                if (driver.verification.pendingUpdate.changesSummary.vehicleTypeChange) {
+                    driver.vehicleDetails.type = driver.verification.pendingUpdate.changesSummary.vehicleTypeChange.to;
+                }
+
+                // Clear pending update
+                driver.verification.pendingUpdate = {
+                    status: null,
+                    proposedChanges: {},
+                    changesSummary: {}
+                };
+
+                await driver.save();
+
+                // TODO: Notify driver of approval
+
+                return res.status(200).json({
+                    success: true,
+                    message: 'Update approved successfully'
+                });
+
+            } else if (action === 'reject') {
+                // Add to history
+                driver.verification.updateHistory.push({
+                    updatedAt: new Date(),
+                    updateType: driver.verification.pendingUpdate.updateType,
+                    status: 'rejected',
+                    changes: driver.verification.pendingUpdate.changesSummary,
+                    reviewedBy: adminId,
+                    feedback
+                });
+
+                // Clear pending update
+                driver.verification.pendingUpdate = {
+                    status: null,
+                    proposedChanges: {},
+                    changesSummary: {},
+                    reviewFeedback: feedback,
+                    reviewedBy: adminId,
+                    reviewedAt: new Date()
+                };
+
+                await driver.save();
+
+                // TODO: Notify driver of rejection with feedback
+
+                return res.status(200).json({
+                    success: true,
+                    message: 'Update rejected',
+                    feedback
+                });
+            }
+
+        } catch (error) {
+            console.error('Error reviewing update:', error);
+            return res.status(500).json({
+                success: false,
+                message: 'Failed to review update'
+            });
+        }
+    }
+
 
     static async getDriverNotification(req, res) {
         // Perform API pre-check

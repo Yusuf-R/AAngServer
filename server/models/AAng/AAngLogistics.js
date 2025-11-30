@@ -288,6 +288,78 @@ const DriverSchema = new Schema({
             enum: ["incomplete", "pending",  "submitted", "approved", "rejected", "suspended", "expired"],
             default: "pending"
         },
+
+        activeData: {
+            basicVerification: {
+                identification: { type: Schema.Types.Mixed },
+                passportPhoto: { type: Schema.Types.Mixed },
+                operationalArea: { type: Schema.Types.Mixed },
+                bankAccounts: [{ type: Schema.Types.Mixed }],
+                isComplete: Boolean,
+                completedAt: Date
+            },
+            specificVerification: {
+                type: Schema.Types.Mixed, // Flexible for different vehicle types
+                activeVerificationType: String,
+                isComplete: Boolean,
+                completedAt: Date
+            },
+            approvedAt: Date,
+            approvedBy: { type: Schema.Types.ObjectId, ref: 'Admin' }
+        },
+
+        pendingUpdate: {
+            exists: { type: Boolean, default: false },
+            status: {
+                type: String,
+                enum: ['pending_review', 'under_review', null],
+                default: null
+            },
+            submittedAt: Date,
+            updateType: {
+                type: String,
+                enum: ['vehicle_upgrade', 'vehicle_downgrade', 'location_change',
+                    'document_renewal', 'bank_account_change', 'comprehensive_update']
+            },
+
+            proposedChanges: {
+                basicVerification: { type: Schema.Types.Mixed },
+                specificVerification: { type: Schema.Types.Mixed },
+                vehicleDetails: { type: Schema.Types.Mixed }
+            },
+
+            changesSummary: {
+                vehicleTypeChange: {
+                    from: String,
+                    to: String
+                },
+                locationChange: {
+                    from: { state: String, lga: String },
+                    to: { state: String, lga: String }
+                },
+                documentsUpdated: [String],
+                bankAccountsChanged: Boolean,
+                identificationChanged: Boolean,
+                totalChanges: Number
+            },
+
+            reviewedBy: { type: Schema.Types.ObjectId, ref: 'Admin' },
+            reviewedAt: Date,
+            reviewFeedback: String,
+            autoExpireAt: Date
+        },
+
+        updateHistory: [{
+            updatedAt: { type: Date, default: Date.now },
+            updateType: String,
+            status: { type: String, enum: ['approved', 'rejected'] },
+            changesSummary: Schema.Types.Mixed,
+            reviewedBy: { type: Schema.Types.ObjectId, ref: 'Admin' },
+            reviewedByName: String,
+            feedback: String,
+            previousData: Schema.Types.Mixed
+        }],
+
         verifiedBy: { type: Schema.Types.ObjectId, ref: 'Admin' },
         verificationDate: Date,
         lastReviewDate: Date,
