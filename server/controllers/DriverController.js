@@ -346,6 +346,7 @@ class DriverController {
                 overallStatus: user.verification.overallStatus || 'pending',
                 complianceScore: user.verification.complianceScore || 100,
                 basicVerification: user.verification.basicVerification || false,
+                activeData: user.verification.activeData || {},
             } : null,
 
             // Schedule and availability
@@ -1353,7 +1354,7 @@ class DriverController {
     }
 
     // Main submission handler
-    static async submitVerification(req, res) {
+    static async oldSubmitVerification(req, res) {
         const preCheckResult = await AuthController.apiPreCheck(req);
 
         if (!preCheckResult.success) {
@@ -1746,7 +1747,7 @@ class DriverController {
      * Submit verification update request
      * POST /api/driver/verification/submit-update
      */
-    static async submitVerificationUpdate(req, res) {
+    static async submitVerification(req, res) {
         const preCheckResult = await AuthController.apiPreCheck(req);
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
@@ -1789,7 +1790,7 @@ class DriverController {
 
             // Get current active data for comparison
             const currentBasic = driver.verification.activeData.basicVerification;
-            const currentVehicle = driver.verification.activeData.vehicleDetails;
+            const currentVehicle = driver.verification.activeData.specificVerification;
 
             // ============================================
             // CALCULATE CHANGES SUMMARY
@@ -2216,7 +2217,7 @@ class DriverController {
         const { Driver } = await getModels();
 
         const approvedDrivers = await Driver.find({
-            'verification.overallStatus': 'approved'
+            'verification.overallStatus': 'submitted'
         });
 
         console.log(`Migrating ${approvedDrivers.length} approved drivers...`);
@@ -2307,7 +2308,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Error initiating update:', error);
+            console.log('Error initiating update:', error);
             return res.status(500).json({
                 success: false,
                 message: 'Failed to initiate update'
@@ -2409,7 +2410,7 @@ class DriverController {
             }
 
         } catch (error) {
-            console.error('Error reviewing update:', error);
+            console.log('Error reviewing update:', error);
             return res.status(500).json({
                 success: false,
                 message: 'Failed to review update'
@@ -2792,7 +2793,7 @@ class DriverController {
 
                 const estimatedETA = DriverController.calculateETA(
                     distance,
-                    1.2 // Traffic factor
+                    1.2
                 );
 
                 // Determine area match type for frontend display
@@ -4599,10 +4600,10 @@ class DriverController {
             return res.status(200).json(response);
 
         } catch (error) {
-            console.error('❌ Confirm pickup error:', error);
+            console.log('❌ Confirm pickup error:', error);
 
             // Log detailed error for debugging
-            console.error('Error details:', {
+            console.log('Error details:', {
                 orderId,
                 driverId: userData._id,
                 stage,
@@ -4842,7 +4843,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Verify delivery token error:', error);
+            console.log('Verify delivery token error:', error);
             return res.status(500).json({
                 error: "An error occurred while verifying delivery token"
             });
@@ -4936,7 +4937,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('❌ Review delivery error:', error);
+            console.log('❌ Review delivery error:', error);
             return res.status(500).json({
                 error: "An error occurred while submitting your rating"
             });
@@ -4994,7 +4995,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Verify delivery token error:', error);
+            console.log('Verify delivery token error:', error);
             return res.status(500).json({
                 error: "An error occurred while verifying delivery token"
             });
@@ -5023,9 +5024,7 @@ class DriverController {
                 offset = 0,
                 status = 'all' // 'all', 'delivered', 'cancelled'
             } = req.query;
-            console.log({
-                params: req.query
-            })
+
             const endYear = new Date().getFullYear();
 
             const {Order} = await getOrderModels();
@@ -5050,9 +5049,6 @@ class DriverController {
             if (status !== 'all') {
                 query.status = status;
             }
-            console.log({
-                month, year
-            })
 
             // Filter by month/year if specified
             if (month && year) {
@@ -5062,7 +5058,6 @@ class DriverController {
                 query.createdAt = {$gte: startDate, $lte: endDate};
             } else {
                 // Default to start of the month of the current year to the end of the year decemeber
-                console.log('Nay')
                 const startOfMonth = new Date(endYear, 0, 1);
                 const endOfMonth = new Date(endYear, 11, 31, 23, 59, 59, 999); // FIX: Use 31 for December
                 query.createdAt = {$gte: startOfMonth, $lte: endOfMonth};
@@ -5367,7 +5362,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Migration error:', error);
+            console.log('Migration error:', error);
             res.status(500).json({
                 success: false,
                 message: 'Migration failed',
@@ -5619,7 +5614,7 @@ class DriverController {
                     successCount++;
 
                 } catch (error) {
-                    console.error(`❌ Error processing ${order.orderRef}:`, error.message);
+                    console.log(`❌ Error processing ${order.orderRef}:`, error.message);
                     errors.push({
                         orderRef: order.orderRef,
                         error: error.message
@@ -5714,7 +5709,7 @@ class DriverController {
             console.log('\n✅ Retroactive processing completed!\n');
 
         } catch (error) {
-            console.error('💥 Fatal error during retroactive processing:', error);
+            console.log('💥 Fatal error during retroactive processing:', error);
             throw error;
         }
     }
@@ -5729,7 +5724,7 @@ class DriverController {
             });
 
         } catch (err) {
-            console.error('Update Records error:', err);
+            console.log('Update Records error:', err);
             res.status(500).json({
                 success: false,
                 message: 'Migration failed',
@@ -6138,7 +6133,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error("Driver earnings analytics error:", error);
+            console.log("Driver earnings analytics error:", error);
             return res.status(500).json({
                 success: false,
                 error: "An error occurred while fetching earnings analytics"
@@ -6187,7 +6182,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error("Get transaction error:", error);
+            console.log("Get transaction error:", error);
             return res.status(500).json({
                 success: false,
                 error: "Failed to fetch transaction details"
@@ -6270,7 +6265,7 @@ class DriverController {
                                     updatedTransactions.push(transaction.toObject());
                                 }
                             } catch (orderError) {
-                                console.error(`❌ Error processing order ${transaction.orderId}:`, orderError.message);
+                                console.log(`❌ Error processing order ${transaction.orderId}:`, orderError.message);
                                 updatedTransactions.push(transaction.toObject());
                             }
                         } else {
@@ -6295,7 +6290,7 @@ class DriverController {
                     }
 
                 } catch (driverError) {
-                    console.error(`❌ Error processing driver ${driver._id}:`, driverError.message);
+                    console.log(`❌ Error processing driver ${driver._id}:`, driverError.message);
                 }
             }
 
@@ -6307,7 +6302,7 @@ class DriverController {
             };
 
         } catch (error) {
-            console.error('❌ Error in updateDriverEarningsFromOrders:', error);
+            console.log('❌ Error in updateDriverEarningsFromOrders:', error);
             return {
                 success: false,
                 message: `Update failed: ${error.message}`,
@@ -6375,7 +6370,7 @@ class DriverController {
             res.status(200).json(result);
 
         } catch (error) {
-            console.error('Error getting earning history:', error);
+            console.log('Error getting earning history:', error);
             res.status(500).json({
                 success: false,
                 message: 'Failed to load transaction history',
@@ -6456,7 +6451,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Request payout error:', error);
+            console.log('Request payout error:', error);
             res.status(500).json({
                 success: false,
                 message: error.message || 'Failed to process withdrawal request',
@@ -6573,7 +6568,7 @@ class DriverController {
                 }
 
             } catch (paystackError) {
-                console.error('Paystack verification error:', paystackError.response?.data || paystackError.message);
+                console.log('Paystack verification error:', paystackError.response?.data || paystackError.message);
 
                 // If Paystack returns 404, transfer not found
                 if (paystackError.response?.status === 404) {
@@ -6609,7 +6604,7 @@ class DriverController {
             }
 
         } catch (error) {
-            console.error('Error getting payout status:', error);
+            console.log('Error getting payout status:', error);
             res.status(500).json({
                 success: false,
                 message: 'Failed to get payout status'
@@ -6774,7 +6769,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Add bank account error:', error);
+            console.log('Add bank account error:', error);
             res.status(500).json({
                 success: false,
                 message: 'Internal server error',
@@ -6873,7 +6868,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Update bank account error:', error);
+            console.log('Update bank account error:', error);
             res.status(500).json({
                 success: false,
                 message: 'Internal server error',
@@ -6967,7 +6962,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Delete bank account error:', error);
+            console.log('Delete bank account error:', error);
             res.status(500).json({
                 success: false,
                 message: 'Internal server error',
@@ -7029,7 +7024,7 @@ class DriverController {
                 accountNumber: primaryAccount.accountNumber,
                 bankName: primaryAccount.bankName,
                 bankCode: primaryAccount.bankCode,
-                verified: primaryAccount.verified,
+                verified: true,
                 verificationDate: primaryAccount.verifiedAt
             };
 
@@ -7045,7 +7040,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Set primary bank account error:', error);
+            console.log('Set primary bank account error:', error);
             res.status(500).json({
                 success: false,
                 message: 'Internal server error',
@@ -7212,7 +7207,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Error reconciling payout:', error);
+            console.log('Error reconciling payout:', error);
             res.status(500).json({
                 success: false,
                 message: 'Failed to reconcile payout'
@@ -7277,7 +7272,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Error reconciling payout:', error);
+            console.log('Error reconciling payout:', error);
             res.status(500).json({
                 success: false,
                 message: 'Failed to reconcile payout'
@@ -7308,7 +7303,7 @@ class DriverController {
             res.status(200).json(report);
 
         } catch (error) {
-            console.error('Error getting payout report:', error);
+            console.log('Error getting payout report:', error);
             res.status(500).json({
                 success: false,
                 message: 'Failed to get payout report'
@@ -7373,7 +7368,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Error getting pending payouts:', error);
+            console.log('Error getting pending payouts:', error);
             res.status(500).json({
                 success: false,
                 message: 'Failed to get pending payouts'
@@ -7401,7 +7396,7 @@ class DriverController {
             res.status(200).json(result);
 
         } catch (error) {
-            console.error('Error reconciling stuck transfers:', error);
+            console.log('Error reconciling stuck transfers:', error);
             res.status(500).json({
                 success: false,
                 message: 'Failed to reconcile stuck transfers'
@@ -7499,7 +7494,7 @@ class DriverController {
             });
 
         } catch (error) {
-            console.error('Error getting payout system health:', error);
+            console.log('Error getting payout system health:', error);
             res.status(500).json({
                 success: false,
                 message: 'Failed to get system health'
@@ -7523,6 +7518,365 @@ class DriverController {
         if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
         if (minutes > 0) return `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
         return 'Just now';
+    }
+
+
+    // Dashboard
+    /**
+     * Get driver wallet data from FinancialTransactions
+     * Handles new drivers with no earnings yet
+     */
+    static async getDriverWallet(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const driverId = userData._id;
+
+        try {
+            const {FinancialTransaction, DriverEarnings} = await getFinancialModels();
+
+            const earnings = await DriverEarnings.findOne({ driverId });
+
+            if (!earnings) {
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        totalEarnings: 0,
+                        totalPayout: 0,
+                        balance: 0,
+                        pending: 0
+                    }
+                });
+            }
+
+            const earningsAggregate = await FinancialTransaction.aggregate([
+                { $match: { driverId, transactionType: 'driver_earning', status: 'completed' } },
+                { $group: { _id: null, total: { $sum: '$amount.net' }, count: { $sum: 1 } } }
+            ]);
+
+            const withdrawalsAggregate = await FinancialTransaction.aggregate([
+                { $match: { driverId, transactionType: 'driver_payout', status: 'completed' } },
+                { $group: { _id: null, total: { $sum: '$amount.gross' }, count: { $sum: 1 } } }
+            ]);
+
+            const earningsStats = earningsAggregate[0] || { total: 0, count: 0 };
+            const withdrawalsStats = withdrawalsAggregate[0] || { total: 0, count: 0 };
+
+            return res.status(200).json({
+                success: true,
+                data: {
+                    totalEarnings: earningsStats.total || 0,
+                    totalPayout: withdrawalsStats.total || 0,
+                    balance: earningsStats.total - withdrawalsStats.total || 0,
+                }
+            });
+        } catch (error) {
+            console.log("Get wallet error:", error);
+            return res.status(500).json({
+                success: false,
+                error: "Failed to fetch wallet data"
+            });
+        }
+    }
+
+    /**
+     * Get driver stats (deliveries & ratings)
+     * Optimized for new drivers with no data
+     */
+    static async getDriverStats(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const driverId = userData._id;
+
+        try {
+            // Get models ONCE at the top
+            const {Driver} = await getModels();
+            const {Order} = await getOrderModels();
+            const { FinancialTransaction } = await getFinancialModels();
+
+            // Verify driver exists
+            const driver = await Driver.findById(driverId);
+            if (!driver) {
+                return res.status(404).json({
+                    success: false,
+                    error: "Driver not found"
+                });
+            }
+
+            // Count total completed deliveries from financial transactions
+            const totalDeliveries = await FinancialTransaction.countDocuments({
+                driverId: new mongoose.Types.ObjectId(driverId),
+                transactionType: 'driver_earning',
+                status: 'completed'
+            });
+
+            // If no deliveries, return early with zeros
+            if (totalDeliveries === 0) {
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        totalDeliveries: 0,
+                        averageRating: 0,
+                        ratingCount: 0,
+                        categoryRatings: {
+                            professionalism: 0,
+                            timeliness: 0,
+                            communication: 0,
+                            care: 0
+                        },
+                        distributionStats: {
+                            fiveStar: 0,
+                            fourStar: 0,
+                            threeStar: 0,
+                            twoStar: 0,
+                            oneStar: 0
+                        }
+                    }
+                });
+            }
+
+            // Calculate average rating from orders
+            const completedOrders = await Order.find({
+                driverId: new mongoose.Types.ObjectId(driverId),
+                status: 'completed',
+                'rating.clientRating.stars': { $exists: true, $ne: null }
+            }).select('rating.clientRating.stars rating.clientRating.categories').lean();
+
+            let totalRating = 0;
+            let ratingCount = 0;
+            const categoryScores = {
+                professionalism: { total: 0, count: 0 },
+                timeliness: { total: 0, count: 0 },
+                communication: { total: 0, count: 0 },
+                care: { total: 0, count: 0 }
+            };
+
+            completedOrders.forEach(order => {
+                if (order.rating?.clientRating?.stars) {
+                    totalRating += order.rating.clientRating.stars;
+                    ratingCount++;
+
+                    // Aggregate category ratings
+                    order.rating.clientRating.categories?.forEach(cat => {
+                        if (categoryScores[cat.category]) {
+                            categoryScores[cat.category].total += cat.rating;
+                            categoryScores[cat.category].count++;
+                        }
+                    });
+                }
+            });
+
+            const averageRating = ratingCount > 0 ? (totalRating / ratingCount).toFixed(2) : 0;
+
+            // Calculate category averages
+            const categoryAverages = {};
+            Object.keys(categoryScores).forEach(key => {
+                const { total, count } = categoryScores[key];
+                categoryAverages[key] = count > 0 ? parseFloat((total / count).toFixed(2)) : 0;
+            });
+
+            return res.status(200).json({
+                success: true,
+                data: {
+                    totalDeliveries,
+                    averageRating: parseFloat(averageRating),
+                    ratingCount,
+                    categoryRatings: categoryAverages,
+                    distributionStats: {
+                        fiveStar: completedOrders.filter(o => o.rating?.clientRating?.stars === 5).length,
+                        fourStar: completedOrders.filter(o => o.rating?.clientRating?.stars === 4).length,
+                        threeStar: completedOrders.filter(o => o.rating?.clientRating?.stars === 3).length,
+                        twoStar: completedOrders.filter(o => o.rating?.clientRating?.stars === 2).length,
+                        oneStar: completedOrders.filter(o => o.rating?.clientRating?.stars === 1).length
+                    }
+                }
+            });
+        } catch (error) {
+            console.log("Get stats error:", error);
+            console.log("Error stack:", error.stack);
+            return res.status(500).json({
+                success: false,
+                error: "Failed to fetch driver stats"
+            });
+        }
+    }
+
+    /**
+     * Get monthly stats for current month
+     * Handles new drivers gracefully
+     */
+    static async getMonthlyStats(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const driverId = userData._id;
+
+        try {
+            // Get models ONCE at the top
+            const {Order} = await getOrderModels();
+            const { FinancialTransaction } = await getFinancialModels();
+
+            const now = new Date();
+            const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+            const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+
+            // Get monthly earnings using aggregation
+            const monthlyEarnings = await FinancialTransaction.aggregate([
+                {
+                    $match: {
+                        driverId: new mongoose.Types.ObjectId(driverId),
+                        transactionType: 'driver_earning',
+                        status: 'completed',
+                        createdAt: { $gte: startOfMonth, $lte: endOfMonth }
+                    }
+                },
+                {
+                    $group: {
+                        _id: null,
+                        totalEarnings: { $sum: '$amount.net' },
+                        deliveryCount: { $sum: 1 }
+                    }
+                }
+            ]);
+
+            const monthData = monthlyEarnings[0] || { totalEarnings: 0, deliveryCount: 0 };
+
+            // Get completed orders this month (as backup/verification)
+            const monthlyOrders = await Order.countDocuments({
+                driverId: new mongoose.Types.ObjectId(driverId),
+                status: 'completed',
+                completedAt: { $gte: startOfMonth, $lte: endOfMonth }
+            });
+
+            return res.status(200).json({
+                success: true,
+                data: {
+                    month: now.toLocaleString('en-US', { month: 'long', year: 'numeric' }),
+                    earnings: monthData.totalEarnings || 0,
+                    deliveries: monthlyOrders || 0,
+                    period: {
+                        start: startOfMonth,
+                        end: endOfMonth
+                    }
+                }
+            });
+        } catch (error) {
+            console.log("Get monthly stats error:", error);
+            console.log("Error stack:", error.stack);
+            return res.status(500).json({
+                success: false,
+                error: "Failed to fetch monthly stats"
+            });
+        }
+    }
+
+    /**
+     * Get recent delivery history
+     * Returns empty array for new drivers
+     */
+    static async getRecentDeliveries(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const driverId = userData._id;
+
+        try {
+            const { limit = 7 } = req.query;
+            const {Order} = await getOrderModels();
+
+            const deliveries = await Order.find({
+                'driverAssignment.driverId': new mongoose.Types.ObjectId(driverId),
+                status: 'delivered',
+            })
+                .sort({ completedAt: -1 })
+                .limit(parseInt(limit))
+                .select({
+                    orderRef: 1,
+                    status: 1,
+                    pricing: 1,
+                    payment: 1,
+                    location: 1,
+                    package: 1,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    'driverAssignment.actualTimes': 1,
+                    'driverAssignment.distance': 1,
+                    'driverAssignment.duration': 1,
+                    'rating.clientRating': 1,
+                    pickupConfirmation: 1,
+                    deliveryConfirmation: 1,
+                    deliveryToken: 1,
+                    tokenVerified: 1
+                })
+                .lean();
+
+            const formattedDeliveries = deliveries.map(delivery => ({
+                id: delivery._id.toString(),
+                orderRef: delivery.orderRef,
+                status: delivery.status,
+                earnings: delivery.payment.financialBreakdown.driverShare || 0,
+                distance: delivery.driverAssignment?.distance?.total || 0,
+                duration: delivery.driverAssignment?.duration?.actual || 0,
+                pickupLocation: {
+                    address: delivery.location?.pickUp?.address || '',
+                    landmark: delivery.location?.pickUp?.landmark || ''
+                },
+                dropoffLocation: {
+                    address: delivery.location?.dropOff?.address || '',
+                    landmark: delivery.location?.dropOff?.landmark || ''
+                },
+                packageCategory: delivery.package?.category || 'other',
+                packageDescription: delivery.package?.description || '',
+                rating: delivery.rating?.clientRating?.stars || null,
+                feedback: delivery.rating?.clientRating?.feedback || '',
+                createdAt: delivery.createdAt,
+                completedAt: delivery.driverAssignment?.actualTimes?.deliveredAt || delivery.updatedAt,
+                hasPickupPhotos: delivery.pickupConfirmation?.photos?.length > 0,
+                hasDeliveryPhotos: delivery.deliveryConfirmation?.photos?.length > 0,
+                tokenVerified: delivery.tokenVerified?.verified || false
+            }));
+
+            return res.status(200).json({
+                success: true,
+                data: formattedDeliveries
+            });
+        } catch (error) {
+            console.log("Get recent deliveries error:", error);
+            console.log("Error stack:", error.stack);
+            return res.status(500).json({
+                success: false,
+                error: "Failed to fetch delivery history"
+            });
+        }
     }
 
 

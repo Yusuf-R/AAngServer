@@ -982,7 +982,7 @@ class OrderController {
                             financialRecordsCreated = true;
                             console.log('✅ Financial records created for order:', order._id);
                         } catch (financialError) {
-                            console.error('❌ Financial recording failed:', financialError);
+                            console.log('❌ Financial recording failed:', financialError);
                             // Continue anyway - we'll retry in webhook/cron job
                         }
                     }
@@ -1589,7 +1589,7 @@ class OrderController {
                     });
                     console.log('✅ Financial records created via webhook:', order._id);
                 } catch (financialError) {
-                    console.error('❌ Financial recording failed in webhook:', financialError);
+                    console.log('❌ Financial recording failed in webhook:', financialError);
                 }
             }
 

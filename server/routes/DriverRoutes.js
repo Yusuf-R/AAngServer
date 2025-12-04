@@ -70,6 +70,13 @@ driverRouter.patch('/order/submit/review', driverController.reviewDelivery)
 
 // get dashboard data
 driverRouter.get('/dashboard/data', driverController.driverData)
+driverRouter.get('/dashboard/get/stats', driverController.getDriverStats)
+driverRouter.get('/dashboard/get/wallet', driverController.getDriverWallet)
+driverRouter.get('/dashboard/get/monthly-stats', driverController.getMonthlyStats)
+driverRouter.get('/dashboard/get/recent-deliveries', driverController.getRecentDeliveries)
+
+
+// analytics (earning and delivery)
 driverRouter.get('/analytics', driverController.driverAnalytics)
 driverRouter.get('/earning/analytics', driverController.driverEarningsAnalytics)
 driverRouter.get('/earning/:transactionId', driverController.getSingleTransaction)

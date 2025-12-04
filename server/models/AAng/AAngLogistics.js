@@ -304,6 +304,14 @@ const DriverSchema = new Schema({
                 isComplete: Boolean,
                 completedAt: Date
             },
+            vehicleDetails: {
+                type: { type: String, enum: ['bicycle', 'motorcycle', 'tricycle', 'van', 'truck', 'car'] },
+                plateNumber: String,
+                model: String,
+                year: Number,
+                color: String,
+                capacity: Schema.Types.Mixed
+            },
             approvedAt: Date,
             approvedBy: { type: Schema.Types.ObjectId, ref: 'Admin' }
         },

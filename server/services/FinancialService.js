@@ -225,11 +225,6 @@ class FinancialService {
             const earningsStats = earningsAggregate[0] || { total: 0, count: 0 };
             const withdrawalsStats = withdrawalsAggregate[0] || { total: 0, count: 0 };
 
-            console.log({
-                totalWithdraw: withdrawalsStats.total,
-                totalEarnings: earningsStats.total
-            })
-
             return {
                 success: true,
                 transactions: transactions,

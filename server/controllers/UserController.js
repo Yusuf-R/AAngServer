@@ -86,7 +86,7 @@ class UserController {
             });
 
         } catch (error) {
-            console.error("Profile update error:", error);
+            console.log("Profile update error:", error);
             return res.status(500).json({
                 error: "An error occurred while updating profile"
             });
@@ -151,7 +151,7 @@ class UserController {
             });
 
         } catch (error) {
-            console.error("Profile update error:", error);
+            console.log("Profile update error:", error);
             return res.status(500).json({
                 error: "An error occurred while updating avatar"
             });
@@ -217,7 +217,7 @@ class UserController {
             });
 
         } catch (error) {
-            console.error("Location creation error:", error);
+            console.log("Location creation error:", error);
 
             // Handle specific MongoDB errors
             if (error.name === 'ValidationError') {
@@ -287,7 +287,7 @@ class UserController {
             });
 
         } catch (error) {
-            console.error("Location update error:", error);
+            console.log("Location update error:", error);
 
             // Handle specific MongoDB errors
             if (error.name === 'ValidationError') {
@@ -376,7 +376,7 @@ class UserController {
             });
 
         } catch (error) {
-            console.error("Location delete error:", error);
+            console.log("Location delete error:", error);
             return res.status(500).json({
                 error: "An error occurred while deleting location"
             });
@@ -423,7 +423,7 @@ class UserController {
             });
 
         } catch (error) {
-            console.error("Get locations error:", error);
+            console.log("Get locations error:", error);
             return res.status(500).json({
                 error: "An error occurred while fetching locations"
             });
@@ -481,7 +481,7 @@ class UserController {
             });
 
         } catch (error) {
-            console.error("Get location by ID error:", error);
+            console.log("Get location by ID error:", error);
             return res.status(500).json({
                 error: "An error occurred while fetching location"
             });
