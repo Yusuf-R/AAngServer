@@ -17,6 +17,7 @@ authRouter.get('/test', AuthController.checkConn);
 
 // Authentication Routes
 authRouter.post('/oauth', AuthController.socialSignIn);
+authRouter.post('/firebase-oauth', AuthController.firebaseSocialSignIn);
 authRouter.post('/refresh', AuthController.refreshToken);
 authRouter.post('/signup', AuthController.signUp);
 authRouter.post('/login', AuthController.logIn);

@@ -285,8 +285,8 @@ const DriverSchema = new Schema({
         // Overall Status
         overallStatus: {
             type: String,
-            enum: ["incomplete", "pending",  "submitted", "approved", "rejected", "suspended", "expired"],
-            default: "pending"
+            enum: ["incomplete", "pending",  "submitted", "approved", "rejected", "suspended", "expired", "not-started"],
+            default: "not-started"
         },
 
         activeData: {

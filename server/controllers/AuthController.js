@@ -15,6 +15,8 @@ import {logInSchema, resetPasswordSchema, signUpSchema, validateSchema} from "..
 import {cloudinary} from '../utils/cloudinary'
 import getOrderModels from "../models/Order";
 import DriverController from "./DriverController"
+import admin from "../utils/firebaseAdmin";
+
 import order from "../models/Order";
 
 // Environment variables
@@ -25,6 +27,7 @@ const accessExpires = process.env.JWT_ACCESS_EXPIRES_IN;
 const refreshExpires = process.env.JWT_REFRESH_EXPIRES_IN;
 const accessExpiresMs = ms(accessExpires);
 const api_key = process.env.CLOUDINARY_API_KEY;
+
 
 // Email configuration for password reset and verification
 const transporter = nodemailer.createTransport({
@@ -300,13 +303,17 @@ class AuthController {
                 {
                     $push: {
                         sessionTokens: {
-                            token: accessToken,
-                            device: deviceString,
-                            ip: options.ip || null,
-                            createdAt: new Date(),
-                            lastActive: new Date()
-                        },
-                    },
+                            $each: [{
+                                token: accessToken,
+                                device: deviceString,
+                                ip: options.ip || null,
+                                createdAt: new Date(),
+                                lastActive: new Date()
+                            }],
+                            $position: 0,  // Add to beginning (most recent first)
+                            $slice: 7       // Keep only 7 total tokens
+                        }
+                    }
                 }
             );
 
@@ -453,6 +460,128 @@ class AuthController {
         } catch (err) {
             console.error('Social sign-in error:', err);
             return res.status(401).json({error: 'Invalid Google token or authentication failed'});
+        }
+    }
+
+
+
+    static async firebaseSocialSignIn(req, res) {
+        const { firebaseIdToken, provider, role, email, name, picture } = req.body;
+
+        if (!firebaseIdToken || !provider || !role) {
+            return res.status(400).json({ error: 'Invalid request: Missing requirements' });
+        }
+
+        if (provider !== 'Google') {
+            return res.status(400).json({ error: 'Unsupported provider' });
+        }
+
+        try {
+            await dbClient.connect();
+
+            // Verify Firebase ID token
+            const decodedToken = await admin.auth().verifyIdToken(firebaseIdToken);
+            const { uid: firebaseUid, email: firebaseEmail } = decodedToken;
+
+            // Use email from token (more secure)
+            const userEmail = (firebaseEmail || email).toLowerCase();
+            const roleCapitalized = role.charAt(0).toUpperCase() + role.slice(1);
+
+            const { AAngBase } = await getModels();
+            let user = await AAngBase.findOne({ email: userEmail });
+
+            if (user) {
+                // Check if Firebase auth is already linked
+                const hasFirebaseAuth = user.authMethods?.some(
+                    method => method.type === 'Google' && method.providerId === firebaseUid
+                );
+
+                if (hasFirebaseAuth) {
+                    // Update last used
+                    const authMethodIndex = user.authMethods.findIndex(
+                        m => m.type === 'Google' && m.providerId === firebaseUid
+                    );
+
+                    if (authMethodIndex !== -1) {
+                        user.authMethods[authMethodIndex].lastUsed = new Date();
+                        user.preferredAuthMethod = 'Google';
+                        await user.save();
+                    }
+                } else {
+                    // Check for conflicts
+                    const conflictUser = await AAngBase.findOne({
+                        'authMethods': {
+                            $elemMatch: {
+                                type: 'Google',
+                                providerId: firebaseUid
+                            }
+                        }
+                    });
+
+                    if (conflictUser) {
+                        return res.status(409).json({
+                            error: 'This Google account is already linked to another user'
+                        });
+                    }
+
+                    // Link Google account to existing user
+                    user.authMethods.push({
+                        type: 'Google',
+                        providerId: firebaseUid,
+                        verified: true,
+                        lastUsed: new Date()
+                    });
+
+                    if (!user.fullName && name) user.fullName = name;
+                    if (!user.avatar && picture) user.avatar = picture;
+
+                    user.preferredAuthMethod = 'Google';
+                    user.emailVerified = true;
+                    await user.save();
+
+                    console.log(`Google account linked to existing user: ${userEmail}`);
+                }
+            } else {
+                // Create new user
+                user = await AAngBase.create({
+                    email: userEmail,
+                    fullName: name,
+                    avatar: picture,
+                    authMethods: [{
+                        type: 'Google',
+                        providerId: firebaseUid,
+                        verified: true,
+                        lastUsed: new Date()
+                    }],
+                    preferredAuthMethod: 'Google',
+                    provider: 'Google',
+                    role: roleCapitalized,
+                    emailVerified: true
+                });
+            }
+
+            // Generate your JWT tokens
+            const { accessToken, refreshToken } = await AuthController.generateJWT(user, {
+                userAgent: req.headers['user-agent'],
+                ip: req.ip,
+                authMethod: 'Google'
+            });
+
+            const userDashboard = await AuthController.userDashBoardData(user);
+
+            return res.status(201).json({
+                accessToken,
+                refreshToken,
+                user: userDashboard,
+                expiresIn: accessExpiresMs
+            });
+
+        } catch (err) {
+            console.error('Firebase social sign-in error:', err);
+            return res.status(401).json({
+                error: 'Invalid Firebase token or authentication failed',
+                details: err.message
+            });
         }
     }
 
@@ -689,7 +818,7 @@ class AuthController {
             );
 
             // Check if refresh token needs rotation
-            const shouldRotate = await AuthController.shouldRotateRefreshToken(decodedRefreshToken);
+            const shouldRotate = AuthController.shouldRotateRefreshToken(decodedRefreshToken);
 
             let newRefreshToken = null;
             let rotated = false;
@@ -870,11 +999,15 @@ class AuthController {
                 {
                     $push: {
                         sessionTokens: {
-                            token: accessToken,
-                            device: deviceString,
-                            ip: req.ip || null,
-                            createdAt: new Date(),
-                            lastActive: new Date()
+                            $each: [{
+                                token: accessToken,
+                                device: deviceString,
+                                ip: req.ip || null,
+                                createdAt: new Date(),
+                                lastActive: new Date()
+                            }],
+                            $position: 0,  // Add to beginning
+                            $slice: 7      // Keep only 7 total
                         }
                     }
                 }
@@ -894,7 +1027,7 @@ class AuthController {
             return res.status(200).json(response);
 
         } catch (err) {
-            console.error('❌ [RefreshToken Error]', err.message);
+            console.log('❌ [RefreshToken Error]', err.message);
             return res.status(401).json({error: 'Invalid or expired tokens'});
         }
     }

@@ -4963,6 +4963,7 @@ class DriverController {
 
     }
 
+    // BE: DriverUtils.js
     static async driverAnalytics(req, res) {
         const preCheckResult = await AuthController.apiPreCheck(req);
 
@@ -4976,16 +4977,30 @@ class DriverController {
         const {userData} = preCheckResult;
 
         try {
-
             const {DriverAnalytics} = await getAnalyticsModels();
             const analytics = await DriverAnalytics.findOne({
                 driverId: userData._id
             });
 
+            // Return empty analytics object instead of 404
             if (!analytics) {
-                return res.status(404).json({
-                    success: false,
-                    message: 'Analytics not found for this driver'
+                return res.json({
+                    success: true,
+                    data: {
+                        // Create empty analytics structure
+                        driverId: userData._id,
+                        totalDeliveries: 0,
+                        completedDeliveries: 0,
+                        cancelledDeliveries: 0,
+                        totalEarnings: 0,
+                        averageRating: 0,
+                        totalDistance: 0,
+                        weeklyStats: [],
+                        monthlyStats: [],
+                        categoryBreakdown: [],
+                        createdAt: new Date(),
+                        updatedAt: new Date()
+                    }
                 });
             }
 
@@ -4995,12 +5010,12 @@ class DriverController {
             });
 
         } catch (error) {
-            console.log('Verify delivery token error:', error);
+            console.log('Analytics fetch error:', error);
             return res.status(500).json({
-                error: "An error occurred while verifying delivery token"
+                success: false,
+                error: "An error occurred while fetching analytics"
             });
         }
-
     }
 
     static async driverDeliveryAnalytics(req, res) {
