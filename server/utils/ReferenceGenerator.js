@@ -12,6 +12,12 @@ class ReferenceGenerator {
         return `aang-pay-${timestamp}-${randomPart}`;
     }
 
+    static generateTopUpReference() {
+        const timestamp = Date.now();
+        const random = Math.random().toString(36).substring(2, 8).toUpperCase();
+        return `WLT-${random}-${timestamp}`;
+    }
+
     /**
      * Generate a unique transaction reference
      */

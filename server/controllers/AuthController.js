@@ -491,6 +491,12 @@ class AuthController {
             let user = await AAngBase.findOne({ email: userEmail });
 
             if (user) {
+                if (user.role.toLowerCase() !== role.toLowerCase()) {
+                    return res.status(403).json({
+                        error: 'Role mismatch',
+                        message: `This email is already registered as a ${user.role}.`,
+                    });
+                }
                 // Check if Firebase auth is already linked
                 const hasFirebaseAuth = user.authMethods?.some(
                     method => method.type === 'Google' && method.providerId === firebaseUid
@@ -2706,7 +2712,7 @@ class AuthController {
         }
 
         const verificationChecks = {
-            Client: () => user.emailVerified === true && user.nin?.verified === true,
+            Client: () => user.emailVerified === true,
 
             Driver: () => {
                 return user.emailVerified === true && user.nin?.verified === true;

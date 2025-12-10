@@ -47,7 +47,7 @@ const FinancialTransactionSchema = new Schema({
     // Transaction Status
     status: {
         type: String,
-        enum: ['pending', 'processing', 'completed', 'failed', 'reversed'],
+        enum: ['pending', 'processing', 'completed', 'failed', 'reversed', 'cancelled', 'abandoned'],
         default: 'pending'
     },
 
@@ -143,6 +143,36 @@ FinancialTransactionSchema.virtual('summary').get(function () {
 // CLIENT WALLET MODEL
 // ============================================
 
+
+const RecentTransactionSchema = new Schema({
+    transactionId: {
+        type: Schema.Types.ObjectId,
+        ref: 'FinancialTransaction',
+        required: true
+    },
+    type: {
+        type: String,
+        enum: ['deposit', 'withdrawal', 'payment', 'refund'],
+        required: true
+    },
+    amount: {
+        type: Number,
+        required: true
+    },
+    balanceAfter: {
+        type: Number,
+        required: true
+    },
+    createdAt: {
+        type: Date,
+        default: Date.now
+    },
+    description: String
+}, {
+    _id: false, // Don't create _id for subdocuments
+    timestamps: false
+});
+
 const ClientWalletSchema = new Schema({
     // clientId here refers to either driverId or clientId
     clientId: {
@@ -170,13 +200,10 @@ const ClientWalletSchema = new Schema({
     },
 
     // Recent Transactions (last 10 for quick access)
-    recentTransactions: [{
-        transactionId: Schema.Types.ObjectId,
-        type: String,
-        amount: Number,
-        balanceAfter: Number,
-        createdAt: Date
-    }],
+    recentTransactions: {
+        type: [RecentTransactionSchema],
+        default: []
+    },
 
     // Wallet Status
     status: {
