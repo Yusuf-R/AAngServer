@@ -2,6 +2,7 @@
 import mongoose from "mongoose";
 import dbClient from "../database/mongoDB";
 import analyticsUpdater, { orderAnalyticsMiddleware, ratingAnalyticsMiddleware } from '../utils/analyticsUpdater.js';
+import ClientAnalyticsUpdater from '../utils/clientAnalyticsUpdater';
 
 
 const {Schema, model} = mongoose;
@@ -696,7 +697,8 @@ OrderSchema.post('save', async function(doc) {
 OrderSchema.post('findOneAndUpdate', async function(doc) {
     if (doc) {
         if (doc.status === 'delivered') {
-            await orderAnalyticsMiddleware(doc);
+            await orderAnalyticsMiddleware(doc)
+            await ClientAnalyticsUpdater.updateOrderAnalytics(doc._id);
         }
 
         if (doc.rating?.clientRating?.stars) {

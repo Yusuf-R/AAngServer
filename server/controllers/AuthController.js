@@ -463,8 +463,6 @@ class AuthController {
         }
     }
 
-
-
     static async firebaseSocialSignIn(req, res) {
         const { firebaseIdToken, provider, role, email, name, picture } = req.body;
 
@@ -1022,10 +1020,10 @@ class AuthController {
             // Prepare response
             const response = {
                 accessToken,
-                refreshToken: rotated ? newRefreshToken : null, // Only include if rotated
+                refreshToken: rotated ? newRefreshToken : refreshToken, // ✅ Always return a token
                 expiresIn: accessExpiresMs,
+                rotated,
                 message: rotated ? 'Tokens refreshed and rotated' : 'Access token refreshed'
-
             };
 
             console.log(`✅ Token refresh successful for user ${user.email} (rotated: ${rotated})`);

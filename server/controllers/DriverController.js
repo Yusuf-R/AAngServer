@@ -4963,7 +4963,7 @@ class DriverController {
 
     }
 
-    // BE: DriverUtils.js
+    // BE: DriverController.js
     static async driverAnalytics(req, res) {
         const preCheckResult = await AuthController.apiPreCheck(req);
 
@@ -5067,7 +5067,6 @@ class DriverController {
 
             // Filter by month/year if specified
             if (month && year) {
-                console.log('Yay')
                 const startDate = new Date(year, month - 1, 1);
                 const endDate = new Date(endYear, 11, 31, 23, 59, 59, 999);
                 query.createdAt = {$gte: startDate, $lte: endDate};

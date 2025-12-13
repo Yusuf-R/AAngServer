@@ -30,5 +30,18 @@ userRouter.get('/wallet/balance', userController.getWalletBalance);
 userRouter.post('/wallet/topup/generate-reference', userController.generateTopUpReference);
 userRouter.post('/wallet/topup/verify', userController.verifyTopUpPayment);
 userRouter.post('/wallet/topup/check-pending', userController.checkPendingTopUp);
+// analytics
+
+// Routes
+// Add to your client routes file
+userRouter.get('/analytics', userController.clientAnalytics);
+userRouter.get('/delivery/analytics', userController.clientOrderAnalytics);
+userRouter.get('/delivery/:orderId', userController.getSingleOrder);
+userRouter.get('/payment/analytics', userController.clientPaymentAnalytics);
+userRouter.get('/payment/:txId', userController.clientSinglePayment);
+
+// /routes/clientAnalyticsRoutes.js - Add this route
+userRouter.post('/analytics/migrate', userController.migrateClientAnalytics);
+
 
 module.exports = userRouter;

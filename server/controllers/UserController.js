@@ -8,6 +8,8 @@ import locationSchema from "../validators/locationValidator";
 import mongoose from "mongoose";
 import ReferenceGenerator from "../utils/ReferenceGenerator";
 import axios from "axios";
+import getClientAnalyticsModels from "../models/Analytics/ClientAnalytics";
+import ClientAnalyticsMigration from '../utils/ClientAnalyticsMigration';
 
 
 class UserController {
@@ -272,9 +274,9 @@ class UserController {
             }
             const {AAngBase} = await getModels();
             const updatedUser = await AAngBase.findOneAndUpdate(
-                { _id: userData._id, 'savedLocations._id': locationData._id },
-                { $set: {'savedLocations.$': locationData }},
-                { new: true }
+                {_id: userData._id, 'savedLocations._id': locationData._id},
+                {$set: {'savedLocations.$': locationData}},
+                {new: true}
             );
             if (!updatedUser) {
                 return res.status(404).json({error: "User or location not found"});
@@ -497,25 +499,25 @@ class UserController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
+        const {userData} = preCheckResult;
 
         try {
-            const { FinancialTransaction, ClientWallet } = await getFinancialModels();
-            const { Order } = await getOrderModels();
-            const { AAngBase } = await getModels();
+            const {FinancialTransaction, ClientWallet} = await getFinancialModels();
+            const {Order} = await getOrderModels();
+            const {AAngBase} = await getModels();
 
             // Get user's wallet data
             const user = await AAngBase.findById(userData._id);
-            const wallet = await ClientWallet.findOne({ clientId: userData._id });
+            const wallet = await ClientWallet.findOne({clientId: userData._id});
 
             // Calculate total orders
             const totalOrders = await Order.countDocuments({
                 clientId: userData._id,
-                status: { $ne: 'cancelled' }
+                status: {$ne: 'cancelled'}
             });
 
             // Calculate completed orders
@@ -536,7 +538,7 @@ class UserController {
                 {
                     $group: {
                         _id: null,
-                        totalPaid: { $sum: '$amount.gross' }
+                        totalPaid: {$sum: '$amount.gross'}
                     }
                 }
             ]);
@@ -557,7 +559,7 @@ class UserController {
             });
         } catch (error) {
             console.log('Get financial data error:', error);
-            return res.status(500).json({ error: 'Failed to fetch financial data' });
+            return res.status(500).json({error: 'Failed to fetch financial data'});
         }
     }
 
@@ -570,25 +572,25 @@ class UserController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
+        const {userData} = preCheckResult;
         const limit = parseInt(req.query.limit) || 10;
         const page = parseInt(req.query.page) || 1;
         const skip = (page - 1) * limit;
 
         try {
-            const { FinancialTransaction } = await getFinancialModels();
+            const {FinancialTransaction} = await getFinancialModels();
 
             // Get transactions for the client
             const transactions = await FinancialTransaction.find({
                 clientId: userData._id,
                 transactionType: "client_payment",
-                status: { $in: ['completed', 'pending', 'failed'] }
+                status: {$in: ['completed', 'pending', 'failed']}
             })
-                .sort({ createdAt: -1 })
+                .sort({createdAt: -1})
                 .limit(limit)
                 .skip(skip)
                 .lean();
@@ -596,7 +598,7 @@ class UserController {
             // Get total count for pagination
             const totalCount = await FinancialTransaction.countDocuments({
                 clientId: userData._id,
-                status: { $in: ['completed', 'pending', 'failed'] }
+                status: {$in: ['completed', 'pending', 'failed']}
             });
 
             return res.status(200).json({
@@ -610,7 +612,7 @@ class UserController {
             });
         } catch (error) {
             console.log('Get transaction history error:', error);
-            return res.status(500).json({ error: 'Failed to fetch transaction history' });
+            return res.status(500).json({error: 'Failed to fetch transaction history'});
         }
     }
 
@@ -620,18 +622,18 @@ class UserController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
+        const {userData} = preCheckResult;
 
         try {
-            const { FinancialTransaction, ClientWallet } = await getFinancialModels();
-            const { Order } = await getOrderModels();
+            const {FinancialTransaction, ClientWallet} = await getFinancialModels();
+            const {Order} = await getOrderModels();
 
             // Get client wallet
-            const wallet = await ClientWallet.findOne({ clientId: userData._id });
+            const wallet = await ClientWallet.findOne({clientId: userData._id});
             const currentBalance = wallet?.balance || 0;
 
             // Calculate order statistics
@@ -645,13 +647,13 @@ class UserController {
                 {
                     $group: {
                         _id: null,
-                        totalOrders: { $sum: 1 },
-                        totalSpent: { $sum: '$payment.amount' },
+                        totalOrders: {$sum: 1},
+                        totalSpent: {$sum: '$payment.amount'},
                         completedOrders: {
-                            $sum: { $cond: [{ $eq: ['$status', 'delivered'] }, 1, 0] }
+                            $sum: {$cond: [{$eq: ['$status', 'delivered']}, 1, 0]}
                         },
                         pendingOrders: {
-                            $sum: { $cond: [{ $in: ['$status', ['pending', 'in_transit', 'assigned']] }, 1, 0] }
+                            $sum: {$cond: [{$in: ['$status', ['pending', 'in_transit', 'assigned']]}, 1, 0]}
                         }
                     }
                 }
@@ -669,28 +671,28 @@ class UserController {
                 {
                     $match: {
                         clientId: userData._id,
-                        transactionType: { $in: ['wallet_deposit', 'wallet_deduction'] },
+                        transactionType: {$in: ['wallet_deposit', 'wallet_deduction']},
                         status: 'completed'
                     }
                 },
                 {
                     $group: {
                         _id: '$transactionType',
-                        total: { $sum: '$amount.net' },
-                        count: { $sum: 1 }
+                        total: {$sum: '$amount.net'},
+                        count: {$sum: 1}
                     }
                 }
             ]);
 
-            const deposits = walletStats.find(s => s._id === 'wallet_deposit') || { total: 0, count: 0 };
-            const deductions = walletStats.find(s => s._id === 'wallet_deduction') || { total: 0, count: 0 };
+            const deposits = walletStats.find(s => s._id === 'wallet_deposit') || {total: 0, count: 0};
+            const deductions = walletStats.find(s => s._id === 'wallet_deduction') || {total: 0, count: 0};
 
             // Get recent transactions (last 10)
             const recentTransactions = await FinancialTransaction.find({
                 clientId: userData._id,
-                transactionType: { $in: ['client_payment', 'wallet_deposit', 'wallet_deduction', 'refund'] }
+                transactionType: {$in: ['client_payment', 'wallet_deposit', 'wallet_deduction', 'refund']}
             })
-                .sort({ createdAt: -1 })
+                .sort({createdAt: -1})
                 .limit(10)
                 .lean();
 
@@ -722,7 +724,7 @@ class UserController {
 
         } catch (error) {
             console.log('Get financial summary error:', error);
-            return res.status(500).json({ error: 'Failed to fetch financial summary' });
+            return res.status(500).json({error: 'Failed to fetch financial summary'});
         }
     }
 
@@ -735,15 +737,15 @@ class UserController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { status = 'all', page = 1, limit = 20 } = req.query;
+        const {userData} = preCheckResult;
+        const {status = 'all', page = 1, limit = 20} = req.query;
 
         try {
-            const { FinancialTransaction } = await getFinancialModels();
+            const {FinancialTransaction} = await getFinancialModels();
 
             // Build query
             let query = {
@@ -761,19 +763,19 @@ class UserController {
 
             // Get top-ups
             const topUps = await FinancialTransaction.find(query)
-                .sort({ createdAt: -1 })
+                .sort({createdAt: -1})
                 .skip(skip)
                 .limit(parseInt(limit))
                 .lean();
 
             // Calculate stats
             const statsAggregate = await FinancialTransaction.aggregate([
-                { $match: { clientId: userData._id, transactionType: 'wallet_deposit' } },
+                {$match: {clientId: userData._id, transactionType: 'wallet_deposit'}},
                 {
                     $group: {
                         _id: '$status',
-                        count: { $sum: 1 },
-                        totalAmount: { $sum: '$amount.net' }
+                        count: {$sum: 1},
+                        totalAmount: {$sum: '$amount.net'}
                     }
                 }
             ]);
@@ -804,7 +806,7 @@ class UserController {
 
         } catch (error) {
             console.log('Get top-up history error:', error);
-            return res.status(500).json({ error: 'Failed to fetch top-up history' });
+            return res.status(500).json({error: 'Failed to fetch top-up history'});
         }
     }
 
@@ -817,25 +819,25 @@ class UserController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { page = 1, limit = 50, type = 'all', status = 'all' } = req.query;
+        const {userData} = preCheckResult;
+        const {page = 1, limit = 50, type = 'all', status = 'all'} = req.query;
 
         try {
-            const { FinancialTransaction } = await getFinancialModels();
+            const {FinancialTransaction} = await getFinancialModels();
 
             // Build query
-            let query = { clientId: userData._id };
+            let query = {clientId: userData._id};
 
             // Filter by type
             if (type !== 'all') {
                 if (type === 'orders') {
                     query.transactionType = 'client_payment';
                 } else if (type === 'wallet') {
-                    query.transactionType = { $in: ['wallet_deposit', 'wallet_deduction'] };
+                    query.transactionType = {$in: ['wallet_deposit', 'wallet_deduction']};
                 } else if (type === 'refunds') {
                     query.transactionType = 'refund';
                 }
@@ -856,7 +858,7 @@ class UserController {
 
             // Get transactions
             const transactions = await FinancialTransaction.find(query)
-                .sort({ createdAt: -1 })
+                .sort({createdAt: -1})
                 .skip(skip)
                 .limit(parseInt(limit))
                 .populate('orderId', 'orderNumber status')
@@ -864,12 +866,12 @@ class UserController {
 
             // Calculate stats
             const stats = await FinancialTransaction.aggregate([
-                { $match: { clientId: userData._id } },
+                {$match: {clientId: userData._id}},
                 {
                     $group: {
                         _id: '$transactionType',
-                        count: { $sum: 1 },
-                        totalAmount: { $sum: '$amount.net' }
+                        count: {$sum: 1},
+                        totalAmount: {$sum: '$amount.net'}
                     }
                 }
             ]);
@@ -895,7 +897,7 @@ class UserController {
 
         } catch (error) {
             console.log('Get financial transactions error:', error);
-            return res.status(500).json({ error: 'Failed to fetch transactions' });
+            return res.status(500).json({error: 'Failed to fetch transactions'});
         }
     }
 
@@ -908,12 +910,12 @@ class UserController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { amount } = req.body;
+        const {userData} = preCheckResult;
+        const {amount} = req.body;
 
         try {
             // Validate amount
@@ -961,7 +963,7 @@ class UserController {
             const paymentData = paystackResponse.data.data;
 
             // Create pending transaction record
-            const { FinancialTransaction } = await getFinancialModels();
+            const {FinancialTransaction} = await getFinancialModels();
 
             const transaction = new FinancialTransaction({
                 transactionType: 'wallet_deposit',
@@ -1013,12 +1015,12 @@ class UserController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { reference } = req.body;
+        const {userData} = preCheckResult;
+        const {reference} = req.body;
 
         try {
             // Verify with Paystack
@@ -1077,16 +1079,16 @@ class UserController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
+        const {userData} = preCheckResult;
 
         try {
-            const { ClientWallet } = await getFinancialModels();
+            const {ClientWallet} = await getFinancialModels();
 
-            const wallet = await ClientWallet.findOne({ clientId: userData._id });
+            const wallet = await ClientWallet.findOne({clientId: userData._id});
 
             return res.status(200).json({
                 success: true,
@@ -1100,16 +1102,9 @@ class UserController {
 
         } catch (error) {
             console.log('Get wallet balance error:', error);
-            return res.status(500).json({ error: 'Failed to fetch wallet balance' });
+            return res.status(500).json({error: 'Failed to fetch wallet balance'});
         }
     }
-
-
-
-
-
-
-
 
 
     /**
@@ -1126,7 +1121,7 @@ class UserController {
             flatFeeThreshold: 2500, // ₦100 fee waived under ₦2,500
         };
 
-        const { decimalFee, flatFee, feeCap, flatFeeThreshold } = PRICING_CONFIG;
+        const {decimalFee, flatFee, feeCap, flatFeeThreshold} = PRICING_CONFIG;
 
         // Convert to number
         const walletAmountNum = parseFloat(walletAmount);
@@ -1192,12 +1187,12 @@ class UserController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { amount } = req.body;
+        const {userData} = preCheckResult;
+        const {amount} = req.body;
 
         try {
             // Validate amount
@@ -1222,7 +1217,7 @@ class UserController {
             const reference = ReferenceGenerator.generateTopUpReference();
 
             // Create pending transaction in DB
-            const { FinancialTransaction } = await getFinancialModels();
+            const {FinancialTransaction} = await getFinancialModels();
 
             // ✅ FIX: Check if reference already exists before creating
             const existingTransaction = await FinancialTransaction.findOne({
@@ -1318,7 +1313,7 @@ class UserController {
 
                 if (duplicateReference) {
                     try {
-                        const { FinancialTransaction } = await getFinancialModels();
+                        const {FinancialTransaction} = await getFinancialModels();
 
                         const existingTransaction = await FinancialTransaction.findOne({
                             'gateway.reference': duplicateReference,
@@ -1365,19 +1360,19 @@ class UserController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { reference  } = req.body;
+        const {userData} = preCheckResult;
+        const {reference} = req.body;
 
         if (!reference) {
             return res.status(400).json({error: "Unknown reference."});
         }
-        const { FinancialTransaction, ClientWallet } = await getFinancialModels();
+        const {FinancialTransaction, ClientWallet} = await getFinancialModels();
         const transaction = await FinancialTransaction.findOne({
-            'gateway.reference': reference ,
+            'gateway.reference': reference,
             transactionType: 'wallet_deposit',
             clientId: userData._id
         });
@@ -1392,7 +1387,7 @@ class UserController {
 
             // ✅ FIX: Check if already processed (webhook or previous verification)
             if (transaction.status === 'completed') {
-                const wallet = await ClientWallet.findOne({ clientId: userData._id });
+                const wallet = await ClientWallet.findOne({clientId: userData._id});
                 return res.status(200).json({
                     success: true,
                     message: 'Wallet topped up successfully',
@@ -1523,14 +1518,14 @@ class UserController {
                         'gateway.metadata.verification_method': 'manual_api'
                     }
                 },
-                { new: false }
+                {new: false}
             );
 
             // ✅ FIX: If update returned null, it means another process already updated it
             if (!updatedTransaction || updatedTransaction.status === 'completed') {
                 console.log('⚠️ Transaction already processed by another process (race condition avoided)');
 
-                const wallet = await ClientWallet.findOne({ clientId: userData._id });
+                const wallet = await ClientWallet.findOne({clientId: userData._id});
 
                 return res.status(200).json({
                     success: true,
@@ -1557,7 +1552,7 @@ class UserController {
             const actualFee = (paymentData.fees || 0) / 100;
             const actualNet = paidAmount - actualFee;
 
-            let wallet = await ClientWallet.findOne({ clientId: userData._id });
+            let wallet = await ClientWallet.findOne({clientId: userData._id});
 
             if (!wallet) {
                 wallet = await ClientWallet.create({
@@ -1624,8 +1619,8 @@ class UserController {
                 if (error.response.data.message === 'Transaction reference not found.') {
                     // this means that the user never even tried paying, then we should just mark it as cancelled
                     await FinancialTransaction.findOneAndUpdate(
-                        { _id: transaction._id },
-                        { $set: { status: 'cancelled' } }
+                        {_id: transaction._id},
+                        {$set: {status: 'cancelled'}}
                     );
                     return res.status(200).json({
                         error: error.response.data.message,
@@ -1655,15 +1650,15 @@ class UserController {
         if (!preCheckResult.success) {
             return res.status(preCheckResult.statusCode).json({
                 error: preCheckResult.error,
-                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
             });
         }
 
-        const { userData } = preCheckResult;
-        const { reference } = req.body;
+        const {userData} = preCheckResult;
+        const {reference} = req.body;
 
         try {
-            const { FinancialTransaction } = await getFinancialModels();
+            const {FinancialTransaction} = await getFinancialModels();
 
             const transaction = await FinancialTransaction.findOne({
                 'gateway.reference': reference,
@@ -1712,6 +1707,885 @@ class UserController {
             console.log('Check pending top-up error:', error);
             return res.status(500).json({
                 error: 'Failed to check transaction status'
+            });
+        }
+    }
+
+
+    // controllers/UserController.js
+
+    static async clientAnalytics(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+
+        try {
+            const {ClientAnalytics} = await getClientAnalyticsModels();
+            const {Order} = await getOrderModels();
+            const { FinancialTransaction, ClientWallet } = await getFinancialModels();
+            const analytics = await ClientAnalytics.findOne({
+                clientId: userData._id
+            });
+
+            // Return empty analytics if none found
+            if (!analytics) {
+                return res.json({
+                    success: true,
+                    data: {
+                        clientId: userData._id,
+                        lifetime: {
+                            totalOrders: 0,
+                            completedOrders: 0,
+                            cancelledOrders: 0,
+                            totalSpent: 0,
+                            totalDistance: 0,
+                            averageOrderValue: 0,
+                            averageRating: 0
+                        },
+                        daily: [],
+                        weekly: [],
+                        monthly: [],
+                        categories: {},
+                        payments: {
+                            totalPaid: 0,
+                            wallet: {currentBalance: 0}
+                        },
+                        createdAt: new Date(),
+                        updatedAt: new Date(),
+                        isNewClient: true
+                    }
+                });
+            }
+
+            // Get client wallet
+            const wallet = await ClientWallet.findOne({clientId: userData._id});
+
+            // Get Client orders, last 10 max for order whose status is delivered
+            const orders = await Order.find({clientId: userData._id, status: 'delivered'}).sort({createdAt: -1}).limit(10);
+
+            res.json({
+                success: true,
+                analytics,
+                wallet,
+                orders
+            });
+
+        } catch (error) {
+            console.log('Analytics fetch error:', error);
+            return res.status(500).json({
+                success: false,
+                error: "An error occurred while fetching analytics"
+            });
+        }
+    }
+
+    static async clientOrderAnalytics(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const clientId = userData._id;
+
+        try {
+            const {
+                month,
+                year,
+                limit = 100,
+                offset = 0,
+                status = 'all'
+            } = req.query;
+
+            const {Order} = await getOrderModels();
+            const {ClientAnalytics} = await getClientAnalyticsModels();
+
+            const analytics = await ClientAnalytics.findOne({clientId});
+            const endYear = new Date().getFullYear();
+
+            if (!analytics) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Analytics not found for this client'
+                });
+            }
+
+            // Build query
+            const query = {
+                clientId: new mongoose.Types.ObjectId(clientId)
+            };
+
+            if (status !== 'all') {
+                query.status = status;
+            }
+
+            // Date filter
+            const currentYear = new Date().getFullYear();
+            if (month && year) {
+                const startDate = new Date(year, month - 1, 1);
+                console.log({startDate});
+                const endDate = new Date(endYear, 11, 31, 23, 59, 59, 999);
+                query.createdAt = {$gte: startDate, $lte: endDate};
+            } else {
+                // Default to start of the month of the current year to the end of the year december
+                const startOfMonth = new Date(endYear, 0, 1);
+                const endOfMonth = new Date(endYear, 11, 31, 23, 59, 59, 999);
+                query.createdAt = {$gte: startOfMonth, $lte: endOfMonth};
+            }
+
+            const totalOrders = await Order.countDocuments(query);
+
+            const orders = await Order.find(query)
+                .select({
+                    orderRef: 1,
+                    status: 1,
+                    pricing: 1,
+                    payment: 1,
+                    location: 1,
+                    package: 1,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    'driverAssignment.actualTimes': 1,
+                    'driverAssignment.distance': 1,
+                    'driverAssignment.duration': 1,
+                    'driverAssignment.driverInfo': 1,
+                    'rating.driverRating': 1
+                })
+                .sort({createdAt: -1})
+                .limit(parseInt(limit))
+                .skip(parseInt(offset))
+                .lean();
+
+            // Calculate summary
+            const summaryPipeline = [
+                {$match: query},
+                {
+                    $group: {
+                        _id: null,
+                        totalOrders: {$sum: 1},
+                        totalSpent: {$sum: '$pricing.totalAmount'},
+                        totalDistance: {$sum: '$driverAssignment.distance.total'},
+                        completedCount: {
+                            $sum: {$cond: [{$eq: ['$status', 'delivered']}, 1, 0]}
+                        },
+                        cancelledCount: {
+                            $sum: {$cond: [{$eq: ['$status', 'cancelled']}, 1, 0]}
+                        },
+                        avgSpent: {$avg: '$pricing.totalAmount'},
+                        avgDistance: {$avg: '$driverAssignment.distance.total'},
+                        avgDuration: {$avg: '$driverAssignment.duration.actual'}
+                    }
+                }
+            ];
+
+            const summaryResult = await Order.aggregate(summaryPipeline);
+            const summary = summaryResult[0] || {
+                totalOrders: 0,
+                totalSpent: 0,
+                totalDistance: 0,
+                completedCount: 0,
+                cancelledCount: 0,
+                avgSpent: 0,
+                avgDistance: 0,
+                avgDuration: 0
+            };
+
+            // Get weekly chart data (last 7 days)
+            const last7Days = Array.from({length: 7}, (_, i) => {
+                const date = new Date();
+                date.setDate(date.getDate() - (6 - i));
+                date.setHours(0, 0, 0, 0);
+                return date;
+            });
+
+            const weeklyData = await Promise.all(
+                last7Days.map(async (date) => {
+                    const nextDay = new Date(date);
+                    nextDay.setDate(date.getDate() + 1);
+
+                    const dayStats = await Order.aggregate([
+                        {
+                            $match: {
+                                clientId: new mongoose.Types.ObjectId(clientId),
+                                createdAt: {$gte: date, $lt: nextDay}
+                            }
+                        },
+                        {
+                            $group: {
+                                _id: null,
+                                orders: {$sum: 1},
+                                spent: {$sum: '$pricing.totalAmount'}
+                            }
+                        }
+                    ]);
+
+                    return {
+                        date: date.toISOString().split('T')[0],
+                        dayName: date.toLocaleDateString('en-US', {weekday: 'short'}),
+                        orders: dayStats[0]?.orders || 0,
+                        spent: dayStats[0]?.spent || 0
+                    };
+                })
+            );
+
+            // Get monthly chart data
+            const monthlyData = await Order.aggregate([
+                {
+                    $match: {
+                        clientId: new mongoose.Types.ObjectId(clientId),
+                        createdAt: {
+                            $gte: new Date(currentYear, 0, 1),
+                            $lte: new Date(currentYear, 11, 31, 23, 59, 59)
+                        }
+                    }
+                },
+                {
+                    $group: {
+                        _id: {$month: '$createdAt'},
+                        orders: {$sum: 1},
+                        spent: {$sum: '$pricing.totalAmount'}
+                    }
+                },
+                {$sort: {_id: 1}}
+            ]);
+
+            const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            const monthlyChartData = monthNames.map((name, index) => {
+                const monthData = monthlyData.find(m => m._id === index + 1);
+                return {
+                    month: name,
+                    orders: monthData?.orders || 0,
+                    spent: monthData?.spent || 0
+                };
+            });
+
+            // Available periods
+            const availablePeriods = await Order.aggregate([
+                {$match: {clientId: new mongoose.Types.ObjectId(clientId)}},
+                {
+                    $group: {
+                        _id: {
+                            year: {$year: '$createdAt'},
+                            month: {$month: '$createdAt'}
+                        },
+                        count: {$sum: 1}
+                    }
+                },
+                {$sort: {'_id.year': -1, '_id.month': -1}}
+            ]);
+
+            const periods = availablePeriods.map(p => ({
+                year: p._id.year,
+                month: p._id.month,
+                count: p.count,
+                label: `${monthNames[p._id.month - 1]} ${p._id.year}`
+            }));
+
+            // Format orders
+            const formattedOrders = orders.map(order => ({
+                id: order._id.toString(),
+                orderRef: order.orderRef,
+                status: order.status,
+                amount: order.pricing?.totalAmount || 0,
+                distance: order.driverAssignment?.distance?.total || 0,
+                duration: order.driverAssignment?.duration?.actual || 0,
+                pickupLocation: {
+                    address: order.location?.pickUp?.address || '',
+                    landmark: order.location?.pickUp?.landmark || ''
+                },
+                dropoffLocation: {
+                    address: order.location?.dropOff?.address || '',
+                    landmark: order.location?.dropOff?.landmark || ''
+                },
+                packageCategory: order.package?.category || 'other',
+                packageDescription: order.package?.description || '',
+                driverName: order.driverAssignment?.driverInfo?.name || '',
+                rating: order.rating?.driverRating?.stars || null,
+                feedback: order.rating?.driverRating?.feedback || '',
+                createdAt: order.createdAt,
+                completedAt: order.driverAssignment?.actualTimes?.deliveredAt || order.updatedAt
+            }));
+
+            return res.status(200).json({
+                success: true,
+                data: {
+                    summary: {
+                        ...summary,
+                        completionRate: summary.totalOrders > 0
+                            ? ((summary.completedCount / summary.totalOrders) * 100).toFixed(1)
+                            : 0
+                    },
+                    charts: {
+                        weekly: weeklyData,
+                        monthly: monthlyChartData
+                    },
+                    orders: formattedOrders,
+                    pagination: {
+                        total: totalOrders,
+                        limit: parseInt(limit),
+                        offset: parseInt(offset),
+                        hasMore: parseInt(offset) + parseInt(limit) < totalOrders
+                    },
+                    filters: {
+                        availablePeriods: periods,
+                        currentMonth: month ? parseInt(month) : new Date().getMonth() + 1,
+                        currentYear: year ? parseInt(year) : new Date().getFullYear(),
+                        currentStatus: status
+                    },
+                    lifetimeStats: {
+                        totalOrders: analytics.lifetime.totalOrders,
+                        totalSpent: analytics.lifetime.totalSpent,
+                        totalDistance: analytics.lifetime.totalDistance,
+                        averageOrderValue: analytics.lifetime.averageOrderValue
+                    }
+                }
+            });
+
+        } catch (error) {
+            console.log("Client order analytics error:", error);
+            return res.status(500).json({
+                success: false,
+                error: "An error occurred while fetching client order analytics"
+            });
+        }
+    }
+
+    static async getSingleOrder(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const {orderId} = req.params;
+
+        try {
+            const {Order} = await getOrderModels();
+
+            const order = await Order.findOne({
+                _id: orderId,
+                clientId: userData._id
+            }).lean();
+
+            if (!order) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Order not found'
+                });
+            }
+
+            return res.status(200).json({
+                success: true,
+                data: order
+            });
+
+        } catch (error) {
+            console.log("Get order error:", error);
+            return res.status(500).json({
+                success: false,
+                error: "Failed to fetch order details"
+            });
+        }
+    }
+
+    // Controller for client payment analytics
+    static async clientPaymentAnalytics(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const clientId = userData._id;
+
+        try {
+            const {
+                month,
+                year,
+                period = 'month',
+                limit = 50,
+                offset = 0
+            } = req.query;
+
+            const {FinancialTransaction, ClientWallet} = await getFinancialModels();
+            const startDate='2025-01-01';
+            const endDate= '2025-12-31';
+
+
+            // Fetch wallet
+            const wallet = await ClientWallet.findOne({clientId});
+
+            if (!wallet) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'No payment history found'
+                });
+            }
+
+            // Build date filter
+            const dateFilter = UserController.buildDateFilter(month, year, period, startDate, endDate);
+
+            // Build transaction query
+            const transactionQuery = {
+                clientId: new mongoose.Types.ObjectId(clientId),
+                transactionType: {$in: ['client_payment', 'wallet_deposit']},
+                status: 'completed'
+            };
+
+            if (Object.keys(dateFilter).length > 0) {
+                transactionQuery.processedAt = dateFilter;
+            }
+
+            // Fetch transactions with pagination
+            const [transactions, totalTransactions] = await Promise.all([
+                FinancialTransaction.find(transactionQuery)
+                    .populate('orderId', 'orderRef status pricing')
+                    .sort({processedAt: -1})
+                    .limit(parseInt(limit))
+                    .skip(parseInt(offset))
+                    .lean(),
+                FinancialTransaction.countDocuments(transactionQuery)
+            ]);
+
+
+            // Calculate period summary
+            const periodSummary = await FinancialTransaction.aggregate([
+                {$match: transactionQuery},
+                {
+                    $group: {
+                        _id: '$transactionType',
+                        totalAmount: {$sum: '$amount.gross'},
+                        count: {$sum: 1},
+                        avgAmount: {$avg: '$amount.gross'},
+                        totalFees: {$sum: '$amount.fees'}
+                    }
+                }
+            ]);
+
+            const payments = periodSummary.find(s => s._id === 'client_payment') || {
+                totalAmount: 0, count: 0, avgAmount: 0, totalFees: 0
+            };
+            const deposits = periodSummary.find(s => s._id === 'wallet_deposit') || {
+                totalAmount: 0, count: 0, avgAmount: 0, totalFees: 0
+            };
+
+            // Calculate spending trends
+            const spendingTrends = await UserController.calculateSpendingTrends(clientId, period);
+
+            // Get payment method breakdown
+            const paymentMethodBreakdown = await FinancialTransaction.aggregate([
+                {$match: transactionQuery},
+                {
+                    $group: {
+                        _id: '$gateway.provider',
+                        count: {$sum: 1},
+                        totalAmount: {$sum: '$amount.gross'}
+                    }
+                }
+            ]);
+
+            // Format transactions
+            const formattedTransactions = transactions.map(tx => ({
+                id: tx._id.toString(),
+                type: tx.transactionType,
+                amount: tx.amount.gross,
+                net: tx.amount.net,
+                fees: tx.amount.fees,
+                status: tx.status,
+                date: tx.processedAt,
+                orderId: tx.orderId?._id?.toString(),
+                orderRef: tx.orderId?.orderRef,
+                description: UserController.formatTransactionDescription(tx),
+                paymentMethod: tx.gateway?.provider || 'wallet',
+                metadata: tx.metadata
+            }));
+
+            console.log({
+                totalTransactions,
+                payments
+            })
+
+            // Calculate insights
+            const insights = await UserController.generateClientInsights(wallet, periodSummary, spendingTrends);
+
+            return res.status(200).json({
+                success: true,
+                data: {
+                    wallet: {
+                        balance: wallet.balance,
+                        totalDeposited: wallet.lifetime.totalDeposited,
+                        totalSpent: wallet.lifetime.totalSpent,
+                        totalRefunded: wallet.lifetime.totalRefunded
+                    },
+                    summary: {
+                        periodPayments: payments.totalAmount,
+                        periodDeposits: deposits.totalAmount,
+                        periodTransactionCount: payments.count + deposits.count,
+                        avgPayment: payments.avgAmount,
+                        totalFees: payments.totalFees + deposits.totalFees,
+                        paymentCount: payments.count,
+                        depositCount: deposits.count
+                    },
+                    trends: {
+                        daily: spendingTrends.daily,
+                        weekly: spendingTrends.weekly,
+                        monthly: spendingTrends.monthly
+                    },
+                    breakdown: {
+                        paymentMethods: paymentMethodBreakdown.map(pm => ({
+                            method: pm._id || 'wallet',
+                            count: pm.count,
+                            totalAmount: pm.totalAmount,
+                            percentage: (pm.totalAmount / (payments.totalAmount + deposits.totalAmount)) * 100
+                        }))
+                    },
+                    transactions: formattedTransactions,
+                    pagination: {
+                        total: totalTransactions,
+                        limit: parseInt(limit),
+                        offset: parseInt(offset),
+                        hasMore: parseInt(offset) + parseInt(limit) < totalTransactions
+                    },
+                    lifetime: {
+                        totalSpent: wallet.lifetime.totalSpent,
+                        totalDeposited: wallet.lifetime.totalDeposited,
+                        totalRefunded: wallet.lifetime.totalRefunded,
+                        transactionCount: wallet.lifetime.transactionCount,
+                        firstDepositAt: wallet.lifetime.firstDepositAt,
+                        lastActivityAt: wallet.lifetime.lastActivityAt
+                    },
+                    insights
+                }
+            });
+
+        } catch (error) {
+            console.log("Client payment analytics error:", error);
+            return res.status(500).json({
+                success: false,
+                error: "An error occurred while fetching payment analytics"
+            });
+        }
+    }
+
+// Helper functions
+    static buildDateFilter(month, year, period, startDate, endDate) {
+        // Priority 1: Specific date range
+        if (startDate && endDate) {
+            return {
+                $gte: new Date(startDate),
+                $lte: new Date(endDate)
+            };
+        }
+
+        // Priority 2: Monthly filter
+        if (month && year) {
+            const monthNum = parseInt(month);
+            const yearNum = parseInt(year);
+
+            // If month is "all" or 0, get entire year
+            if (monthNum === 0 || month === 'all') {
+                return {
+                    $gte: new Date(yearNum, 0, 1), // Jan 1
+                    $lte: new Date(yearNum, 11, 31, 23, 59, 59, 999) // Dec 31
+                };
+            }
+
+            // Specific month
+            const startDate = new Date(yearNum, monthNum - 1, 1);
+            const endDate = new Date(yearNum, monthNum, 0, 23, 59, 59, 999);
+            return { $gte: startDate, $lte: endDate };
+        }
+
+        // Priority 3: Period-based filters
+        const now = new Date();
+        const targetYear = parseInt(year) || now.getFullYear();
+
+        switch(period) {
+            case 'week':
+                const weekAgo = new Date(now);
+                weekAgo.setDate(weekAgo.getDate() - 7);
+                return { $gte: weekAgo };
+
+            case 'month':
+                const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+                return { $gte: startOfMonth };
+
+            case 'year':
+                const startOfYear = new Date(targetYear, 0, 1);
+                const endOfYear = new Date(targetYear, 11, 31, 23, 59, 59, 999);
+                return { $gte: startOfYear, $lte: endOfYear };
+
+            case 'all':
+            default:
+                return {}; // No date filter
+        }
+    }
+
+    static formatTransactionDescription(tx) {
+        if (tx.metadata?.description) return tx.metadata.description;
+
+        if (tx.transactionType === 'client_payment') {
+            return tx.orderId?.orderRef
+                ? `Payment for ${tx.orderId.orderRef}`
+                : 'Order payment';
+        }
+
+        if (tx.transactionType === 'wallet_deposit') {
+            return `Wallet top-up via ${tx.gateway?.provider || 'gateway'}`;
+        }
+
+        return 'Transaction';
+    }
+
+    static async calculateSpendingTrends(clientId, period) {
+        const {FinancialTransaction} = await getFinancialModels();
+        const now = new Date();
+
+        // Daily trend (last 7 days)
+        const dailyTrend = await FinancialTransaction.aggregate([
+            {
+                $match: {
+                    clientId: new mongoose.Types.ObjectId(clientId),
+                    transactionType: 'client_payment',
+                    status: 'completed',
+                    processedAt: {$gte: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)}
+                }
+            },
+            {
+                $group: {
+                    _id: {$dateToString: {format: '%Y-%m-%d', date: '$processedAt'}},
+                    totalSpent: {$sum: '$amount.gross'},
+                    count: {$sum: 1}
+                }
+            },
+            {$sort: {_id: 1}}
+        ]);
+
+        // Weekly trend (last 12 weeks)
+        const weeklyTrend = await FinancialTransaction.aggregate([
+            {
+                $match: {
+                    clientId: new mongoose.Types.ObjectId(clientId),
+                    transactionType: 'client_payment',
+                    status: 'completed',
+                    processedAt: {$gte: new Date(now.getTime() - 84 * 24 * 60 * 60 * 1000)}
+                }
+            },
+            {
+                $group: {
+                    _id: {
+                        week: {$week: '$processedAt'},
+                        year: {$year: '$processedAt'}
+                    },
+                    totalSpent: {$sum: '$amount.gross'},
+                    count: {$sum: 1}
+                }
+            },
+            {$sort: {'_id.year': 1, '_id.week': 1}}
+        ]);
+
+        // Monthly trend (last 12 months)
+        const monthlyTrend = await FinancialTransaction.aggregate([
+            {
+                $match: {
+                    clientId: new mongoose.Types.ObjectId(clientId),
+                    transactionType: 'client_payment',
+                    status: 'completed',
+                    processedAt: {$gte: new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000)}
+                }
+            },
+            {
+                $group: {
+                    _id: {
+                        month: {$month: '$processedAt'},
+                        year: {$year: '$processedAt'}
+                    },
+                    totalSpent: {$sum: '$amount.gross'},
+                    count: {$sum: 1}
+                }
+            },
+            {$sort: {'_id.year': 1, '_id.month': 1}}
+        ]);
+
+        return {
+            daily: dailyTrend,
+            weekly: weeklyTrend,
+            monthly: monthlyTrend
+        };
+    }
+
+    static async generateClientInsights(wallet, periodSummary, trends) {
+        const payments = periodSummary.find(s => s._id === 'client_payment') || {totalAmount: 0, count: 0};
+        const deposits = periodSummary.find(s => s._id === 'wallet_deposit') || {totalAmount: 0, count: 0};
+
+        const insights = [];
+
+        // Wallet balance insight
+        if (wallet.balance < 5000) {
+            insights.push({
+                type: 'warning',
+                title: 'Low Wallet Balance',
+                message: `Your wallet balance is ₦${wallet.balance.toLocaleString()}. Consider topping up for faster checkouts.`,
+                icon: 'wallet-outline'
+            });
+        }
+
+        // Spending pattern
+        if (payments.count > 0) {
+            const avgSpending = payments.totalAmount / payments.count;
+            insights.push({
+                type: 'info',
+                title: 'Your Average Order',
+                message: `You typically spend ₦${avgSpending.toLocaleString()} per order.`,
+                icon: 'stats-chart-outline'
+            });
+        }
+
+        // Deposit vs spending
+        if (deposits.totalAmount > payments.totalAmount * 1.5) {
+            insights.push({
+                type: 'success',
+                title: 'Great Budgeting!',
+                message: `You're topping up more than you spend. Keep it up!`,
+                icon: 'thumbs-up-outline'
+            });
+        }
+
+        // Fees insight
+        const totalFees = (payments.totalFees || 0) + (deposits.totalFees || 0);
+        if (totalFees > 1000) {
+            insights.push({
+                type: 'tip',
+                title: 'Save on Fees',
+                // message: `You paid ₦${totalFees.toLocaleString()} in fees. Use wallet payments to reduce transaction costs.`,
+                message: `Wallet payments is possible for your delivery settlements.`,
+                icon: 'bulb-outline'
+            });
+        }
+
+        return insights;
+    }
+
+    static async clientSinglePayment(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const {txId} = req.params;
+
+        try {
+            const {FinancialTransaction} = await getFinancialModels();
+            const trxData = await FinancialTransaction.findOne({
+                _id: txId,
+                clientId: userData._id
+            }).lean();
+
+            if (!trxData) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Transaction data not found'
+                });
+            }
+
+            return res.status(200).json({
+                success: true,
+                data: trxData
+            });
+
+        } catch (error) {
+            console.log("Get transaction data error:", error);
+            return res.status(500).json({
+                success: false,
+                error: "Failed to fetch transaction data"
+            });
+        }
+
+    }
+
+
+    /**
+     * Migrate client analytics from existing data
+     * POST /api/client/analytics/migrate
+     */
+    static async migrateClientAnalytics(req, res) {
+        try {
+            const {
+                batchSize = 50,
+                clientLimit = null,
+                skipExisting = true,
+                startDate = '2025-01-01'
+            } = req.body;
+
+            console.log('📊 Client Analytics Migration requested with options:', {
+                batchSize,
+                clientLimit,
+                skipExisting,
+                startDate
+            });
+
+            // Validate user is admin or system
+            // const preCheckResult = await AuthController.apiPreCheck(req);
+            // if (!preCheckResult.success || preCheckResult.userData.role !== 'admin') {
+            //     return res.status(403).json({
+            //         success: false,
+            //         message: 'Unauthorized: Only admins can trigger migrations'
+            //     });
+            // }
+
+            // Start migration in background
+            const migration = new ClientAnalyticsMigration();
+
+            // Run migration (non-blocking)
+            migration.migrate({
+                batchSize,
+                clientLimit,
+                skipExisting,
+                startDate
+            }).then(result => {
+                console.log('✅ Client Analytics Migration completed:', result);
+            }).catch(error => {
+                console.error('❌ Client Analytics Migration failed:', error);
+            });
+
+            // Return immediate response
+            res.json({
+                success: true,
+                message: 'Client analytics migration started in background',
+                note: 'Check server logs for progress and completion',
+                estimatedTime: '5-30 minutes depending on data volume'
+            });
+
+        } catch (error) {
+            console.log('Client analytics migration error:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Migration initialization failed',
+                error: error.message
             });
         }
     }
