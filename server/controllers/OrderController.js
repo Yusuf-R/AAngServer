@@ -378,7 +378,6 @@ class OrderController {
     }
 
     static async getAllClientOrders(req, res) {
-        console.log('First time get');
         // Perform API pre-check
         const preCheckResult = await AuthController.apiPreCheck(req);
         if (!preCheckResult.success) {
@@ -1833,6 +1832,165 @@ class OrderController {
      */
     static successResponse(res, message, data = {}) {
         return res.status(200).json({message, ...data});
+    }
+
+    // order history
+    // Add these new methods to your Order Controller
+
+    static async getOrderHistory(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const clientId = userData._id;
+
+        // Get query parameters
+        const { month, year, limit = 50, skip = 0 } = req.query;
+
+        try {
+            const {Order} = await getOrderModels();
+
+            // Build query for completed orders only
+            const completedStatuses = ['delivered', 'failed', 'cancelled', 'returned'];
+            let query = {
+                clientId: new mongoose.Types.ObjectId(clientId),
+                status: { $in: completedStatuses }
+            };
+
+            // Add date filtering if month/year provided
+            if (month && year) {
+                const monthIndex = parseInt(month) - 1; // 0-indexed
+                const startDate = new Date(parseInt(year), monthIndex, 1);
+                const endDate = new Date(parseInt(year), monthIndex + 1, 0, 23, 59, 59);
+
+                query.updatedAt = {
+                    $gte: startDate,
+                    $lte: endDate
+                };
+            } else if (year && !month) {
+                const startDate = new Date(parseInt(year), 0, 1);
+                const endDate = new Date(parseInt(year), 11, 31, 23, 59, 59);
+
+                query.updatedAt = {
+                    $gte: startDate,
+                    $lte: endDate
+                };
+            }
+
+            // Get orders with pagination
+            const orders = await Order.find(query)
+                .sort({ updatedAt: -1 })
+                .limit(parseInt(limit))
+                .skip(parseInt(skip))
+                .lean();
+
+            // Get total count for pagination
+            const totalCount = await Order.countDocuments(query);
+
+            // Get available periods (months/years with data)
+            const availablePeriods = await Order.aggregate([
+                {
+                    $match: {
+                        clientId: new mongoose.Types.ObjectId(clientId),
+                        status: { $in: completedStatuses }
+                    }
+                },
+                {
+                    $group: {
+                        _id: {
+                            year: { $year: "$updatedAt" },
+                            month: { $month: "$updatedAt" }
+                        }
+                    }
+                },
+                {
+                    $sort: { "_id.year": -1, "_id.month": -1 }
+                }
+            ]);
+
+            return res.status(200).json({
+                message: "Order history retrieved successfully",
+                data: {
+                    orders,
+                    pagination: {
+                        total: totalCount,
+                        limit: parseInt(limit),
+                        skip: parseInt(skip),
+                        hasMore: totalCount > parseInt(skip) + parseInt(limit)
+                    },
+                    availablePeriods: availablePeriods.map(p => ({
+                        month: p._id.month,
+                        year: p._id.year
+                    })),
+                    currentPeriod: {
+                        month: month || null,
+                        year: year || null
+                    }
+                }
+            });
+        } catch (err) {
+            console.log("Get order history error:", err);
+            return res.status(500).json({
+                error: "Failed to retrieve order history"
+            });
+        }
+    }
+
+    static async searchOrderHistory(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const clientId = userData._id;
+        const { searchQuery } = req.query;
+
+        if (!searchQuery || searchQuery.trim() === '') {
+            return res.status(400).json({
+                error: "Search query is required"
+            });
+        }
+
+        try {
+            const {Order} = await getOrderModels();
+
+            const completedStatuses = ['delivered', 'failed', 'cancelled', 'returned'];
+
+            // Search in orderRef and package description
+            const orders = await Order.find({
+                clientId: new mongoose.Types.ObjectId(clientId),
+                status: { $in: completedStatuses },
+                $or: [
+                    { orderRef: { $regex: searchQuery, $options: 'i' } },
+                    { 'package.description': { $regex: searchQuery, $options: 'i' } }
+                ]
+            })
+                .sort({ updatedAt: -1 })
+                .limit(50)
+                .lean();
+
+            return res.status(200).json({
+                message: "Search completed successfully",
+                data: {
+                    orders,
+                    searchQuery
+                }
+            });
+        } catch (err) {
+            console.log("Search order history error:", err);
+            return res.status(500).json({
+                error: "Failed to search order history"
+            });
+        }
     }
 }
 

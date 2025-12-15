@@ -18,6 +18,8 @@ orderRouter.options('*', cors(corsOptions));
 orderRouter.post('/instantiate', orderController.instantObject);
 orderRouter.post('/create', orderController.createOrder);
 orderRouter.get('/all', orderController.getAllClientOrders);
+orderRouter.get('/history', orderController.getOrderHistory);
+orderRouter.get('/history/search', orderController.searchOrderHistory);
 orderRouter.delete('/delete', orderController.deleteOrder);
 orderRouter.patch('/save', orderController.saveDraft);
 orderRouter.patch('/submit', orderController.submitOrder);
