@@ -5,6 +5,8 @@ import SecurityConfig from "../utils/config";
 const express = require('express');
 const cors = require('cors');
 const userController = require('../controllers/UserController');
+const chatController = require('../controllers/ChatController');
+const ticketController = require('../controllers/TicketController');
 
 const securityConfig = new SecurityConfig();
 const {corsOptions} = securityConfig;
@@ -30,18 +32,25 @@ userRouter.get('/wallet/balance', userController.getWalletBalance);
 userRouter.post('/wallet/topup/generate-reference', userController.generateTopUpReference);
 userRouter.post('/wallet/topup/verify', userController.verifyTopUpPayment);
 userRouter.post('/wallet/topup/check-pending', userController.checkPendingTopUp);
-// analytics
 
-// Routes
-// Add to your client routes file
+// analytics
 userRouter.get('/analytics', userController.clientAnalytics);
 userRouter.get('/delivery/analytics', userController.clientOrderAnalytics);
 userRouter.get('/delivery/:orderId', userController.getSingleOrder);
 userRouter.get('/payment/analytics', userController.clientPaymentAnalytics);
 userRouter.get('/payment/:txId', userController.clientSinglePayment);
-
-// /routes/clientAnalyticsRoutes.js - Add this route
 userRouter.post('/analytics/migrate', userController.migrateClientAnalytics);
+
+// chat
+userRouter.post('/support/chat/message/send', chatController.sendMessage);
+userRouter.post('/support/chat/get-or-create', chatController.getOrCreateClientSupportConversation);
+userRouter.get('/support/chat/messages/:conversationId', chatController.getConversationMessages);
+
+// ticket
+userRouter.post('/support/ticket/create', ticketController.createTicket);
+userRouter.get('/support/ticket/all', ticketController.getAllUserTicket);
+userRouter.get('/support/ticket/get', ticketController.getTicketById);
+userRouter.delete('/support/ticket/delete', ticketController.deleteTicket);
 
 
 module.exports = userRouter;

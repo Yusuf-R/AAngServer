@@ -11,6 +11,7 @@ import NotificationService from "../services/NotificationService";
 import Notification from '../models/Notification';
 import getFinancialModels from '../models/Finance/FinancialTransactions';
 import FinancialService from "../services/FinancialService";
+import ChatService from "../services/ChatService";
 import axios from "axios";
 
 const DELIVERY_STAGES = {
@@ -3082,6 +3083,29 @@ class DriverController {
             // get dashboard
             const dashboard = await DriverController.userDashBoardData(user);
 
+            // ====================================================
+            // 💬 INITIALIZE DRIVER-CLIENT CONVERSATION
+            // ====================================================
+            try {
+                const conversationResult = await ChatService.initializeDriverClientConversation({
+                    orderId: order._id,
+                    driverId: userData._id,
+                    driverName: userData.fullName,
+                    clientId: order.clientId,
+                    orderRef: order.orderRef,
+                    vehicleType: userData.vehicleDetails.type,
+                    estimatedETA: Math.ceil(estimatedETA)
+                });
+
+                if (conversationResult.success) {
+                    console.log('✅ Driver-Client conversation initialized');
+                } else {
+                    console.log('⚠️ Failed to initialize conversation (non-blocking):', conversationResult.error);
+                }
+            } catch (chatError) {
+                console.log('⚠️ Chat initialization error (non-blocking):', chatError);
+            }
+
             // ⚠️ SEND NOTIFICATIONS (New section)
             try {
 
@@ -3135,7 +3159,6 @@ class DriverController {
             }
 
             // TODO: Update OrderAssignment record -- maybe for emergency fallback
-
 
             return res.status(200).json({
                 success: true,

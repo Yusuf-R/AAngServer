@@ -12,9 +12,6 @@ export const setIO = (io) => {
     ioInstance = io;
 };
 
-
-
-
 // Helper function to serialize MongoDB documents
 const serializeDoc = (doc) => {
     if (!doc) return null;
@@ -29,7 +26,6 @@ const standardRole = (r) => {
 }
 
 class ChatController {
-
 
     static async sendMessage(req, res) {
         console.log('📤 sendMessage called');
@@ -163,12 +159,6 @@ class ChatController {
     }
 
     /**
-     * Get or create support conversation for Driver
-     * Matches driver with customer_support admin
-     */
-    // server/controllers/ChatController.js
-
-    /**
      * Get driver's complete chat data:
      * - Support conversation (ADMIN_DRIVER)
      * - Active client conversations (DRIVER_CLIENT)
@@ -187,7 +177,7 @@ class ChatController {
 
         try {
             const Conversation = await getConversationModel();
-            const Order = await getOrderModels();
+            const { Order } = await getOrderModels();
             const Message = await getMessageModel();
             const {AAngBase, Client, Driver, Admin} = await getModels();
             // ====================================================
@@ -288,7 +278,6 @@ class ChatController {
                 type: 'DRIVER_CLIENT',
                 'participants.userId': userData._id,
                 status: 'open',
-                // Only get conversations with active or recently completed orders
                 orderId: {$ne: null}
             })
                 .sort({lastMessageAt: -1})
@@ -383,6 +372,291 @@ class ChatController {
 
         } catch (error) {
             console.error('❌ Error in getOrCreateDriverSupportConversation:', error);
+            return res.status(500).json({
+                success: false,
+                error: error.message
+            });
+        }
+    }
+
+
+    /**
+     * Get or create support conversation for Client
+     * Creates ADMIN_CLIENT conversation type
+     */
+    /**
+     * Get or create support conversation for Client
+     * Returns:
+     * - ADMIN_CLIENT support conversation
+     * - Active DRIVER_CLIENT conversations (for ongoing orders)
+     */
+    static async getOrCreateClientSupportConversation(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+
+        try {
+            const Conversation = await getConversationModel();
+            const { Order } = await getOrderModels();
+            const Message = await getMessageModel();
+            const { Admin, Client, Driver } = await getModels();
+
+            // ====================================================
+            // PART 1: Get or Create ADMIN_CLIENT Support Chat
+            // ====================================================
+            let supportConversation = null;
+            let supportMessages = [];
+            let adminInfo = null;
+            let isNewSupport = false;
+
+            // Check for existing support conversation
+            const existingSupportConv = await Conversation.findOne({
+                type: 'ADMIN_CLIENT',
+                'participants.userId': userData._id,
+                status: 'open',
+            }).sort({ lastMessageAt: -1 }).limit(1);
+
+            if (existingSupportConv) {
+                // Load existing support conversation
+                const adminParticipant = existingSupportConv.participants.find(
+                    p => p.role === 'Admin'
+                );
+
+                adminInfo = await Admin.findById(adminParticipant.userId)
+                    .select('fullName avatar phoneNumber email adminRole')
+                    .lean();
+
+                supportMessages = await Message.find({
+                    conversationId: existingSupportConv._id,
+                    deletedAt: null
+                })
+                    .sort({ createdAt: 1 })
+                    .limit(50)
+                    .lean();
+
+                supportConversation = existingSupportConv;
+
+                console.log(`✅ Found existing support conversation for client: ${userData._id}`);
+
+            } else {
+                // Create new support conversation
+                const availableAdmin = await Admin.findOne({
+                    status: 'Active',
+                    adminRole: { $in: ['customer_support', 'super_admin', 'platform_manager'] },
+                })
+                    .select('_id fullName avatar phoneNumber email adminRole')
+                    .lean();
+
+                if (!availableAdmin) {
+                    return res.status(503).json({
+                        success: false,
+                        error: 'No support admin available at the moment. Please try again later.'
+                    });
+                }
+
+                // Create conversation
+                supportConversation = await Conversation.create({
+                    type: 'ADMIN_CLIENT',
+                    orderId: null,
+                    participants: [
+                        { userId: availableAdmin._id, role: 'Admin', lastReadSeq: 0 },
+                        { userId: userData._id, role: 'Client', lastReadSeq: 0 }
+                    ],
+                    status: 'open',
+                    deleteControl: 'ADMIN_ONLY',
+                    createdBy: userData._id,
+                    lastActivityBy: userData._id
+                });
+
+                // Create welcome message
+                const welcomeMessage = await Message.create({
+                    conversationId: supportConversation._id,
+                    seq: 1,
+                    senderId: availableAdmin._id,
+                    senderRole: 'Admin',
+                    kind: 'system',
+                    body: `Welcome! You've been connected with ${availableAdmin.fullName} from our support team. How can we assist you today?`,
+                    createdAt: new Date()
+                });
+
+                // Update conversation
+                await Conversation.updateOne(
+                    { _id: supportConversation._id },
+                    { $inc: { nextSeq: 1, messageCount: 1 } }
+                );
+
+                supportMessages = [welcomeMessage.toObject()];
+                adminInfo = availableAdmin;
+                isNewSupport = true;
+
+                console.log(`✅ Created new support conversation for client: ${userData._id}`);
+            }
+
+            // ====================================================
+            // PART 2: Get Active DRIVER_CLIENT Conversations
+            // ====================================================
+            const driverConversations = await Conversation.find({
+                type: 'DRIVER_CLIENT',
+                'participants.userId': userData._id,
+                status: 'open',
+                // Only get conversations with active orders
+                orderId: { $ne: null }
+            })
+                .sort({ lastMessageAt: -1 })
+                .limit(10)
+                .lean();
+
+            // Enrich driver conversations with driver info and messages
+            const enrichedDriverConversations = await Promise.all(
+                driverConversations.map(async (conv) => {
+                    try {
+                        // Get driver participant
+                        const driverParticipant = conv.participants.find(
+                            p => p.role === 'Driver'
+                        );
+
+                        if (!driverParticipant) return null;
+
+                        // Get driver info
+                        const driverInfo = await Driver.findById(driverParticipant.userId)
+                            .select('fullName avatar phoneNumber email vehicleInfo')
+                            .lean();
+
+                        if (!driverInfo) return null;
+
+                        // Get order info (for context)
+                        const orderInfo = await Order.findById(conv.orderId)
+                            .select('orderRef status pickupLocation dropoffLocation')
+                            .lean();
+
+                        // Get recent messages
+                        const messages = await Message.find({
+                            conversationId: conv._id,
+                            deletedAt: null
+                        })
+                            .sort({ createdAt: 1 })
+                            .limit(50)
+                            .lean();
+
+                        // Calculate unread count for client
+                        const clientParticipant = conv.participants.find(
+                            p => p.userId.toString() === userData._id.toString()
+                        );
+                        const unreadCount = Math.max(0, conv.messageCount - (clientParticipant?.lastReadSeq || 0));
+
+                        return {
+                            conversation: conv,
+                            driverInfo,
+                            orderInfo,
+                            messages,
+                            unreadCount
+                        };
+                    } catch (error) {
+                        console.error(`Error enriching driver conversation ${conv._id}:`, error);
+                        return null;
+                    }
+                })
+            );
+
+            // Filter out null values (failed enrichments)
+            const validDriverConversations = enrichedDriverConversations.filter(c => c !== null);
+
+            console.log(`✅ Found ${validDriverConversations.length} active driver conversations for client`);
+
+            // ====================================================
+            // PART 3: Return Complete Chat Data
+            // ====================================================
+            return res.json({
+                success: true,
+                data: serializeDoc({
+                    // Support conversation
+                    supportConversation: {
+                        conversation: supportConversation,
+                        messages: supportMessages,
+                        adminInfo,
+                        isNew: isNewSupport
+                    },
+
+                    // Driver conversations (for active orders)
+                    driverConversations: validDriverConversations,
+
+                    // Summary
+                    summary: {
+                        totalConversations: 1 + validDriverConversations.length,
+                        supportAvailable: true,
+                        activeDriverChats: validDriverConversations.length,
+                        hasUnreadMessages: validDriverConversations.some(c => c.unreadCount > 0)
+                    }
+                })
+            });
+
+        } catch (error) {
+            console.error('❌ Error in getOrCreateClientSupportConversation:', error);
+            return res.status(500).json({
+                success: false,
+                error: error.message
+            });
+        }
+    }
+
+
+    /**
+     * Get messages for a conversation (shared utility)
+     */
+    static async getConversationMessages(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && { tokenExpired: true })
+            });
+        }
+
+        const { userData } = preCheckResult;
+        const { conversationId } = req.params;
+        const { limit = 50 } = req.query;
+
+        try {
+            const Conversation = await getConversationModel();
+            const Message = await getMessageModel();
+
+            // Verify user has access to this conversation
+            const conversation = await Conversation.findOne({
+                _id: conversationId,
+                'participants.userId': userData._id
+            });
+
+            if (!conversation) {
+                return res.status(404).json({
+                    success: false,
+                    error: 'Conversation not found or access denied'
+                });
+            }
+
+            // Get messages
+            const messages = await Message.find({
+                conversationId,
+                deletedAt: null
+            })
+                .sort({ createdAt: 1 })
+                .limit(parseInt(limit))
+                .lean();
+
+            return res.json({
+                success: true,
+                data: serializeDoc(messages)
+            });
+
+        } catch (error) {
+            console.error('❌ Error getting conversation messages:', error);
             return res.status(500).json({
                 success: false,
                 error: error.message
