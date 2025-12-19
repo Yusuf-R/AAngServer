@@ -1,5 +1,6 @@
 import AuthController from "./AuthController";
 import getOrderModels, {generateOrderRef} from "../models/Order";
+import getFinancialModels from '../models/Finance/FinancialTransactions.js';
 import getModels from "../models/AAng/AAngLogistics";
 import mongoose from "mongoose";
 import {calculateTotalPrice} from "../utils/LogisticPricingEngine";
@@ -8,6 +9,12 @@ import crypto from 'crypto';
 import NotificationService from "../services/NotificationService";
 import Notification from "../models/Notification";
 import FinancialService from "../services/FinancialService";
+import {
+    calculateOrderFinancials,
+    createOrderFinancialTransactions,
+    validateFinancialIntegrity
+} from '../utils/FinancialCalculator.js';
+
 
 const secret = process.env.PAYSTACK_SECRET_KEY;
 const url = process.env.PAYSTACK_URL;
@@ -102,13 +109,30 @@ class OrderController {
 
         try {
             const {Order} = await getOrderModels();
-            const {AAngBase, Client, Driver} = await getModels();
+            const {Client} = await getModels();
+            const {ClientWallet} = await getFinancialModels();
 
             // Validate client exists
             const client = await Client.findById(clientId);
             if (!client) {
                 throw new Error('Client not found');
             }
+
+            let walletBalance = 0;
+            try {
+                const wallet = await ClientWallet.findOne({clientId});
+                if (wallet && wallet.status === 'active') {
+                    walletBalance = wallet.balance || 0;
+                }
+            } catch (walletError) {
+                // Silently fail - new users won't have wallets yet
+                console.log('Wallet fetch info (not an error):', walletError.message);
+                walletBalance = 0;
+            }
+
+            console.log({
+                currBal: walletBalance
+            })
 
             // Create minimal draft order with only required fields
             const draftOrder = new Order({
@@ -155,11 +179,13 @@ class OrderController {
                     sourceIP: req.ip,
                     userAgent: req.get('User-Agent'),
                     notes: 'Draft order for form completion',
+                    walletBalance,
                     draftProgress: {
                         step: 1,
                         completedSteps: [],
                         lastUpdated: new Date()
-                    }
+                    },
+
                 },
 
                 // Generate delivery token for later use
@@ -486,12 +512,11 @@ class OrderController {
             return 'residential';
         };
 
-        // step 3 is review (+ insurance) and final pricing
+        // step 3 is review (+ insurance) and final pricing // step is of index starting at 0
         if (orderData.metadata?.draftProgress?.step === 3) {
 
             // Extract FE calculated total
             const frontendTotal = orderData.pricing?.totalAmount;
-
             const frontendInsurance = orderData.insurance;
 
             // Prepare data for BE calculation
@@ -546,17 +571,46 @@ class OrderController {
                 });
             }
 
-            // Update orderData with BE-verified pricing and insurance
+            // 🔥 CRITICAL FIX: Save COMPLETE pricing data including breakdown
             orderData.pricing = {
-                ...backendPricing.backendPricing,
-                pricingBreakdown: backendPricing.backendPricing.pricingBreakdown
+                // Top-level fields (required by schema)
+                baseFare: backendPricing.backendPricing.baseFare,
+                distanceFare: backendPricing.backendPricing.distanceFare,
+                timeFare: backendPricing.backendPricing.timeFare || 0,
+                weightFare: backendPricing.backendPricing.weightFare,
+                priorityFare: backendPricing.backendPricing.priorityFare,
+                surcharges: backendPricing.backendPricing.surcharges || [],
+                discount: backendPricing.backendPricing.discount,
+                totalAmount: backendPricing.backendPricing.totalAmount,
+                currency: backendPricing.backendPricing.currency,
+
+                // 🔥 CRITICAL: Include complete pricingBreakdown
+                // This is ESSENTIAL for wallet/hybrid payment calculations
+                pricingBreakdown: backendPricing.backendPricing.pricingBreakdown,
+
+                // Keep existing financialReferences if any
+                financialReferences: orderData.pricing?.financialReferences || {
+                    paymentTransactionId: null,
+                    driverEarningTransactionId: null,
+                    platformRevenueTransactionId: null,
+                    payoutTransactionIds: []
+                }
             };
+
+            // Update insurance with verification
             orderData.insurance = {
                 ...frontendInsurance,
                 verified: true,
                 verifiedAt: new Date()
             };
-            console.log('Pricing and insurance verified by backend');
+
+            console.log('✅ Pricing and insurance verified by backend');
+            console.log('✅ PricingBreakdown saved:', {
+                calculationId: backendPricing.backendPricing.pricingBreakdown.calculationId,
+                deliveryTotal: backendPricing.backendPricing.pricingBreakdown.revenueDistribution.deliveryTotal,
+                customerAmount: backendPricing.backendPricing.pricingBreakdown.paymentFees.customerAmount,
+                expectedPaystackFee: backendPricing.backendPricing.pricingBreakdown.paymentFees.processingFee
+            });
         }
 
         try {
@@ -570,7 +624,7 @@ class OrderController {
                         package: orderData.package,
                         location: orderData.location,
                         vehicleRequirements: orderData.vehicleRequirements,
-                        pricing: orderData.pricing,
+                        pricing: orderData.pricing, // Now includes complete pricingBreakdown
                         insurance: orderData.insurance,
                         priority: orderData.priority,
                         orderType: orderData.orderType,
@@ -594,7 +648,9 @@ class OrderController {
                                 userId: clientId,
                                 role: 'client'
                             },
-                            notes: 'Order draft saved'
+                            notes: orderData.metadata?.draftProgress?.step === 3
+                                ? 'Order draft saved - Pricing verified and breakdown stored'
+                                : 'Order draft saved'
                         }
                     }
                 },
@@ -611,9 +667,74 @@ class OrderController {
             });
 
         } catch (err) {
-            console.log("Save draft error:", err);
-            return res.status(500).json({error: "Failed to save draft order"});
+            console.error("Save draft error:", err);
+
+            // More detailed error logging
+            if (err.name === 'ValidationError') {
+                console.error('Validation errors:', Object.keys(err.errors));
+                return res.status(400).json({
+                    error: "Validation failed",
+                    details: Object.keys(err.errors).map(key => ({
+                        field: key,
+                        message: err.errors[key].message
+                    }))
+                });
+            }
+
+            return res.status(500).json({
+                error: "Failed to save draft order",
+                details: process.env.NODE_ENV === 'development' ? err.message : undefined
+            });
         }
+    }
+
+    static async resumeDraft(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const clientId = userData._id;
+        const {orderId} = req.query;
+
+        if (!orderId) {
+            return res.status(400).json({error: "Order ID is required"});
+        }
+
+        try {
+            const {Order} = await getOrderModels();
+
+            // Find and validate order
+            const order = await Order.findOne({_id: orderId, clientId}).lean();
+
+            if (!order) {
+                return res.status(404).json({
+                    error: "Order not found",
+                    details: "Order does not exist or you don't have permission to access it"
+                });
+            }
+
+            // Validate order status
+            if (order.status !== ORDER_STATUS.DRAFT) {
+                return res.status(400).json({
+                    error: "Invalid order status",
+                    details: `Only draft orders can be resumed`
+                });
+            }
+
+            return res.status(200).json({
+                orderData: order
+            });
+
+        } catch (err) {
+            console.error("Resume draft error:", err);
+            return res.status(500).json({error: "Failed to resume draft order"});
+        }
+
     }
 
     static async updateOrder(req, res) {
@@ -915,7 +1036,7 @@ class OrderController {
      * @param req
      * @param res
      */
-    static async paystackPaymentCallback(req, res) {
+    static async oldPaystackPaymentCallback(req, res) {
         let {orderId, reference} = req.query;
         // Fix: Handle reference as array
         if (Array.isArray(reference)) {
@@ -1170,6 +1291,674 @@ class OrderController {
     }
 
     /**
+     * This callback is invoked by PayStack after payment completion
+     * Paystack will pass this url to the browser
+     * Browser will trigger the url which will then make an api call essentially to this function
+     * We then verify the payment and update the order accordingly
+     * Upon Success, we return with a deep link url which will trigger the mobile device to close the browser and open the app
+     * the App opens to the deep link provided
+     * Upon Failure, we return with a deep link url which will trigger the mobile device to close the browser and open the app
+     * the App opens to the deep link provided
+     * @param req
+     * @param res
+     */
+    static async paystackPaymentCallback(req, res) {
+        let {orderId, reference} = req.query;
+
+        // Fix: Handle reference as array
+        if (Array.isArray(reference)) {
+            reference = reference[0];
+        }
+
+        console.log('Payment callback received:', {orderId, reference});
+
+        if (!orderId || !reference) {
+            console.log('Missing parameters in callback');
+            return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?reason=invalid_parameters`);
+        }
+
+        try {
+            const {Order} = await getOrderModels();
+            const {ClientWallet, FinancialTransaction} = await getFinancialModels();
+
+            const order = await Order.findOne({
+                _id: orderId,
+                'payment.reference': reference
+            }).select('+payment');
+
+            if (!order) {
+                console.log('Order not found for callback:', orderId, reference);
+                return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?reason=order_not_found&orderId=${orderId}`);
+            }
+
+            // ✅ If already paid, just redirect to success
+            if (order.payment.status === PAYMENT_STATUS.PAID) {
+                console.log('✅ Payment already processed, redirecting:', reference);
+                return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reference=${reference}`);
+            }
+
+            // ✅ Detect payment type
+            const isHybridPayment = reference.includes('-HYBRID-') ||
+                order.payment.metadata?.paymentType === 'hybrid';
+
+            console.log('🔍 Processing callback:', {
+                reference,
+                orderId,
+                isHybrid: isHybridPayment,
+                currentStatus: order.payment.status
+            });
+
+            // Verify payment with PayStack
+            try {
+                const verification = await verifyPayStackTransaction(reference);
+                const verificationData = verification.data;
+
+                if (verificationData.status === 'success') {
+                    const paidAmount = verificationData.amount / 100;
+
+                    // ✅ Determine expected amount based on payment type
+                    let expectedAmount;
+                    if (isHybridPayment) {
+                        expectedAmount = order.payment.cardAmount || order.payment.metadata?.cardAmount;
+                        console.log('🔄 Hybrid payment callback:', {
+                            totalAmount: order.payment.amount,
+                            cardAmount: expectedAmount,
+                            walletAmount: order.payment.walletAmount || order.payment.metadata?.walletAmount,
+                            paidAmount
+                        });
+                    } else {
+                        expectedAmount = order.payment.amount;
+                        console.log('💳 Card-only payment callback:', {
+                            expectedAmount,
+                            paidAmount
+                        });
+                    }
+
+                    // Verify amount matches
+                    if (Math.abs(paidAmount - expectedAmount) > 0.01) {
+                        console.log('❌ Callback amount mismatch:', {
+                            expected: expectedAmount,
+                            received: paidAmount,
+                            isHybrid: isHybridPayment
+                        });
+                        return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reason=amount_mismatch`);
+                    }
+
+                    console.log('✅ Amount verification passed');
+
+                    // ============================================
+                    // HYBRID PAYMENT FINALIZATION
+                    // ============================================
+                    if (isHybridPayment) {
+                        const walletAmount = order.payment.walletAmount || order.payment.metadata?.walletAmount;
+                        const cardAmount = paidAmount;
+
+                        console.log('🔄 Finalizing hybrid payment in callback:', {
+                            walletAmount,
+                            cardAmount,
+                            total: order.payment.amount
+                        });
+
+                        // Check if financial records already exist
+                        const existingPaymentTxn = order.pricing?.financialReferences?.paymentTransactionId;
+
+                        let cardTransaction, walletTransaction, savedTransactions;
+                        let financialBreakdown;
+                        let financialRecordsCreated = false;
+
+                        if (!existingPaymentTxn) {
+                            // Get wallet and verify balance
+                            const wallet = await ClientWallet.findOne({clientId: order.clientId});
+                            if (!wallet || wallet.balance < walletAmount) {
+                                console.error('❌ Insufficient wallet balance in callback:', {
+                                    required: walletAmount,
+                                    available: wallet?.balance
+                                });
+
+                                await Order.findByIdAndUpdate(order._id, {
+                                    'payment.status': PAYMENT_STATUS.FAILED,
+                                    'payment.failureReason': 'Insufficient wallet balance at callback',
+                                    'payment.failedAt': new Date()
+                                });
+
+                                return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reason=insufficient_wallet_balance`);
+                            }
+
+                            try {
+                                // 🔥 Calculate financial breakdown
+                                const pricingBreakdown = order.pricing.pricingBreakdown;
+                                financialBreakdown = calculateOrderFinancials(
+                                    pricingBreakdown,
+                                    'hybrid',
+                                    walletAmount,
+                                    cardAmount
+                                );
+
+                                // Validate calculations
+                                const validation = validateFinancialIntegrity(order, financialBreakdown);
+                                if (!validation.valid) {
+                                    console.error('❌ Financial validation failed:', validation.errors);
+                                    return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reason=financial_calculation_error`);
+                                }
+
+                                // 1. Create card payment transaction
+                                cardTransaction = new FinancialTransaction({
+                                    transactionType: 'client_payment',
+                                    orderId: order._id,
+                                    clientId: order.clientId,
+                                    amount: {
+                                        gross: cardAmount,
+                                        fees: (verificationData.fees || 0) / 100,
+                                        net: cardAmount - ((verificationData.fees || 0) / 100),
+                                        currency: 'NGN'
+                                    },
+                                    status: 'completed',
+                                    gateway: {
+                                        provider: 'paystack',
+                                        reference: reference,
+                                        channel: verificationData.channel,
+                                        metadata: verificationData
+                                    },
+                                    metadata: {
+                                        description: `Card payment for order ${order.orderRef} (Hybrid)`,
+                                        paymentType: 'hybrid',
+                                        callback: true,
+                                        pricingCalculationId: pricingBreakdown.calculationId
+                                    },
+                                    processedBy: 'system',
+                                    processedAt: new Date()
+                                });
+
+                                await cardTransaction.save();
+
+                                // 2. Deduct from wallet
+                                walletTransaction = new FinancialTransaction({
+                                    transactionType: 'wallet_deduction',
+                                    orderId: order._id,
+                                    clientId: order.clientId,
+                                    amount: {
+                                        gross: walletAmount,
+                                        fees: 0,
+                                        net: walletAmount,
+                                        currency: 'NGN'
+                                    },
+                                    status: 'completed',
+                                    gateway: {
+                                        provider: 'wallet',
+                                        reference: `WALLET-${Date.now()}-${order._id}`,
+                                        channel: 'wallet'
+                                    },
+                                    wallet: {
+                                        used: true,
+                                        amount: walletAmount,
+                                        balanceBefore: wallet.balance,
+                                        balanceAfter: wallet.balance - walletAmount
+                                    },
+                                    metadata: {
+                                        description: `Wallet payment for order ${order.orderRef} (Hybrid)`,
+                                        paymentType: 'hybrid',
+                                        relatedTransactionId: cardTransaction._id,
+                                        callback: true,
+                                        pricingCalculationId: pricingBreakdown.calculationId
+                                    },
+                                    processedBy: 'system',
+                                    processedAt: new Date()
+                                });
+
+                                await walletTransaction.save();
+
+                                // 3. Update wallet balance
+                                wallet.balance -= walletAmount;
+                                wallet.lifetime.totalSpent += walletAmount;
+                                wallet.lifetime.transactionCount += 1;
+                                wallet.lifetime.lastActivityAt = new Date();
+
+                                wallet.recentTransactions.unshift({
+                                    transactionId: walletTransaction._id,
+                                    type: 'payment',
+                                    amount: -walletAmount,
+                                    balanceAfter: wallet.balance,
+                                    description: `Hybrid payment for order ${order.orderRef}`
+                                });
+                                wallet.recentTransactions = wallet.recentTransactions.slice(0, 10);
+
+                                await wallet.save();
+
+                                // 4. Create all financial transactions
+                                const financialTransactions = createOrderFinancialTransactions(
+                                    order,
+                                    financialBreakdown,
+                                    walletTransaction
+                                );
+
+                                savedTransactions = await Promise.all(
+                                    financialTransactions.map(txn => new FinancialTransaction(txn).save())
+                                );
+
+                                financialRecordsCreated = true;
+                                console.log('✅ Financial records created via callback');
+
+                            } catch (financialError) {
+                                console.log('❌ Financial recording failed in callback:', financialError);
+                                // Continue anyway - webhook or manual check will retry
+                            }
+                        } else {
+                            console.log('ℹ️ Financial records already exist (likely from webhook)');
+                            cardTransaction = await FinancialTransaction.findById(existingPaymentTxn);
+                            walletTransaction = await FinancialTransaction.findById(
+                                order.pricing.financialReferences.walletTransactionId
+                            );
+                            financialBreakdown = order.payment.financialBreakdown;
+                        }
+
+                        // 5. Update order atomically
+                        const updateResult = await Order.findOneAndUpdate(
+                            {
+                                _id: orderId,
+                                'payment.reference': reference,
+                                'payment.status': {$ne: PAYMENT_STATUS.PAID}
+                            },
+                            {
+                                $set: {
+                                    'payment.status': PAYMENT_STATUS.PAID,
+                                    'payment.paidAt': new Date(),
+                                    'payment.paystackData': verificationData,
+                                    'payment.clientPaymentTransactionId': cardTransaction?._id,
+                                    'payment.financialBreakdown': financialBreakdown,
+                                    'payment.breakdown': {
+                                        total: order.payment.amount,
+                                        cardAmount: cardAmount,
+                                        walletAmount: walletAmount,
+                                        paystackFee: (verificationData.fees || 0) / 100,
+                                        isHybrid: true
+                                    },
+                                    'pricing.financialReferences': existingPaymentTxn ? undefined : {
+                                        paymentTransactionId: cardTransaction._id,
+                                        walletTransactionId: walletTransaction._id,
+                                        driverEarningTransactionId: savedTransactions[0]._id,
+                                        platformRevenueTransactionId: savedTransactions[1]._id,
+                                        platformBonusRevenueTransactionId: savedTransactions[2]?._id || null
+                                    },
+                                    'status': ORDER_STATUS.SUBMITTED,
+                                    'metadata.draftProgress.step': 4,
+                                    'metadata.draftProgress.fieldCompletion.payment': true,
+                                    'metadata.draftProgress.completedAt': new Date(),
+                                    'metadata.draftProgress.lastUpdated': new Date(),
+                                    'payment.financialRecordsCreated': financialRecordsCreated
+                                },
+                                $addToSet: {
+                                    'metadata.draftProgress.completedSteps': 4
+                                },
+                                $push: {
+                                    orderInstantHistory: {
+                                        status: ORDER_STATUS.SUBMITTED,
+                                        timestamp: new Date(),
+                                        updatedBy: {
+                                            userId: order.clientId,
+                                            role: 'system'
+                                        },
+                                        notes: `Hybrid payment confirmed via callback. Wallet: ₦${walletAmount.toLocaleString()}, Card: ₦${cardAmount.toLocaleString()}`
+                                    },
+                                    orderTrackingHistory: {
+                                        $each: [
+                                            {
+                                                status: 'payment_completed',
+                                                timestamp: new Date(),
+                                                title: 'Payment Completed',
+                                                description: `Payment successful: Wallet (₦${walletAmount.toLocaleString()}) + Card (₦${cardAmount.toLocaleString()})`,
+                                                icon: "💳",
+                                                isCompleted: true,
+                                                isCurrent: false,
+                                            },
+                                            {
+                                                status: 'order_submitted',
+                                                timestamp: new Date(),
+                                                title: 'Order Submitted',
+                                                description: 'Your order has been submitted and is pending admin review.',
+                                                icon: "📤",
+                                                isCompleted: false,
+                                                isCurrent: true,
+                                            }
+                                        ]
+                                    }
+                                }
+                            },
+                            {new: true}
+                        );
+
+                        // Only send notifications if order was actually updated
+                        if (updateResult) {
+                            const [existingOrderNotification, existingPaymentNotification] = await Promise.all([
+                                Notification.findOne({
+                                    userId: order.clientId,
+                                    category: 'ORDER',
+                                    type: 'order.created',
+                                    'metadata.orderId': order._id
+                                }).lean(),
+                                Notification.findOne({
+                                    userId: order.clientId,
+                                    category: 'PAYMENT',
+                                    type: 'payment.successful',
+                                    'metadata.orderId': order._id
+                                }).lean()
+                            ]);
+
+                            const notificationPromises = [];
+
+                            if (!existingOrderNotification) {
+                                notificationPromises.push(
+                                    NotificationService.createNotification({
+                                        userId: order.clientId,
+                                        type: 'order.created',
+                                        templateData: {orderId: order.orderRef},
+                                        metadata: {
+                                            orderId: order._id,
+                                            orderRef: order.orderRef,
+                                        }
+                                    })
+                                );
+                            }
+
+                            if (!existingPaymentNotification) {
+                                notificationPromises.push(
+                                    NotificationService.createNotification({
+                                        userId: order.clientId,
+                                        type: 'payment.successful',
+                                        templateData: {
+                                            amount: order.payment.amount,
+                                            orderId: order.orderRef,
+                                            paymentMethod: 'Wallet + Card',
+                                            walletAmount: walletAmount,
+                                            cardAmount: cardAmount
+                                        },
+                                        metadata: {
+                                            orderId: order._id,
+                                            orderRef: order.orderRef,
+                                            paymentData: verificationData,
+                                            gateway: 'PayStack',
+                                            isHybrid: true,
+                                            totalAmount: order.payment.amount,
+                                            cardAmount: cardAmount,
+                                            walletAmount: walletAmount
+                                        }
+                                    })
+                                );
+                            }
+
+                            if (notificationPromises.length > 0) {
+                                await Promise.all(notificationPromises);
+                            }
+
+                            console.log('✅ Hybrid payment successful via callback:', reference);
+                        }
+
+                        return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reference=${reference}`);
+                    }
+
+                    // ============================================
+                    // CARD-ONLY PAYMENT FINALIZATION
+                    // ============================================
+                    console.log('💳 Finalizing card-only payment in callback');
+
+                    // Check if financial records already exist
+                    const existingPaymentTxn = order.pricing?.financialReferences?.paymentTransactionId;
+
+                    let cardTransaction, savedTransactions;
+                    let financialBreakdown;
+                    let financialRecordsCreated = false;
+
+                    if (!existingPaymentTxn) {
+                        try {
+                            // Calculate financial breakdown
+                            const pricingBreakdown = order.pricing.pricingBreakdown;
+                            financialBreakdown = calculateOrderFinancials(
+                                pricingBreakdown,
+                                'paystack',
+                                0,
+                                paidAmount
+                            );
+
+                            // Create card payment transaction
+                            cardTransaction = new FinancialTransaction({
+                                transactionType: 'client_payment',
+                                orderId: order._id,
+                                clientId: order.clientId,
+                                amount: {
+                                    gross: paidAmount,
+                                    fees: (verificationData.fees || 0) / 100,
+                                    net: paidAmount - ((verificationData.fees || 0) / 100),
+                                    currency: 'NGN'
+                                },
+                                status: 'completed',
+                                gateway: {
+                                    provider: 'paystack',
+                                    reference: reference,
+                                    channel: verificationData.channel,
+                                    metadata: verificationData
+                                },
+                                metadata: {
+                                    description: `Card payment for order ${order.orderRef}`,
+                                    paymentType: 'paystack',
+                                    callback: true,
+                                    pricingCalculationId: pricingBreakdown.calculationId
+                                },
+                                processedBy: 'system',
+                                processedAt: new Date()
+                            });
+
+                            await cardTransaction.save();
+
+                            // Create financial transactions
+                            const financialTransactions = createOrderFinancialTransactions(
+                                order,
+                                financialBreakdown,
+                                null
+                            );
+
+                            savedTransactions = await Promise.all(
+                                financialTransactions.map(txn => new FinancialTransaction(txn).save())
+                            );
+
+                            financialRecordsCreated = true;
+                            console.log('✅ Financial records created via callback');
+
+                        } catch (financialError) {
+                            console.log('❌ Financial recording failed in callback:', financialError);
+                            // Continue anyway - webhook or manual check will retry
+                        }
+                    } else {
+                        console.log('ℹ️ Financial records already exist (likely from webhook)');
+                        cardTransaction = await FinancialTransaction.findById(existingPaymentTxn);
+                        financialBreakdown = order.payment.financialBreakdown;
+                    }
+
+                    // Update order if not already updated
+                    const updateResult = await Order.findOneAndUpdate(
+                        {
+                            _id: orderId,
+                            'payment.reference': reference,
+                            'payment.status': {$ne: PAYMENT_STATUS.PAID}
+                        },
+                        {
+                            $set: {
+                                'payment.status': PAYMENT_STATUS.PAID,
+                                'payment.paidAt': new Date(),
+                                'payment.paystackData': verificationData,
+                                'payment.clientPaymentTransactionId': cardTransaction?._id,
+                                'payment.financialBreakdown': financialBreakdown,
+                                'pricing.financialReferences': existingPaymentTxn ? undefined : {
+                                    paymentTransactionId: cardTransaction._id,
+                                    driverEarningTransactionId: savedTransactions[0]._id,
+                                    platformRevenueTransactionId: savedTransactions[1]._id
+                                },
+                                'status': ORDER_STATUS.SUBMITTED,
+                                'metadata.draftProgress.step': 4,
+                                'metadata.draftProgress.fieldCompletion.payment': true,
+                                'metadata.draftProgress.completedAt': new Date(),
+                                'metadata.draftProgress.lastUpdated': new Date(),
+                                'payment.financialRecordsCreated': financialRecordsCreated
+                            },
+                            $addToSet: {
+                                'metadata.draftProgress.completedSteps': 4
+                            },
+                            $push: {
+                                orderInstantHistory: {
+                                    status: ORDER_STATUS.SUBMITTED,
+                                    timestamp: new Date(),
+                                    updatedBy: {
+                                        userId: order.clientId,
+                                        role: 'system'
+                                    },
+                                    notes: `Payment confirmed via callback. Amount: ₦${paidAmount.toLocaleString()}`
+                                },
+                                orderTrackingHistory: {
+                                    $each: [
+                                        {
+                                            status: 'payment_completed',
+                                            timestamp: new Date(),
+                                            title: 'Payment Completed',
+                                            description: 'Your payment was successful. Order is now submitted for processing.',
+                                            icon: "✅",
+                                            isCompleted: true,
+                                            isCurrent: false,
+                                        },
+                                        {
+                                            status: 'order_submitted',
+                                            timestamp: new Date(),
+                                            title: 'Order Submitted',
+                                            description: 'Your order has been submitted and is pending processing.',
+                                            icon: "📤",
+                                            isCompleted: false,
+                                            isCurrent: true,
+                                        }
+                                    ]
+                                }
+                            }
+                        },
+                        {new: true}
+                    );
+
+                    // Only send notifications if order was actually updated
+                    if (updateResult) {
+                        const [existingOrderNotification, existingPaymentNotification] = await Promise.all([
+                            Notification.findOne({
+                                userId: order.clientId,
+                                category: 'ORDER',
+                                type: 'order.created',
+                                'metadata.orderId': order._id
+                            }).lean(),
+                            Notification.findOne({
+                                userId: order.clientId,
+                                category: 'PAYMENT',
+                                type: 'payment.successful',
+                                'metadata.orderId': order._id
+                            }).lean()
+                        ]);
+
+                        const notificationPromises = [];
+
+                        if (!existingOrderNotification) {
+                            notificationPromises.push(
+                                NotificationService.createNotification({
+                                    userId: order.clientId,
+                                    type: 'order.created',
+                                    templateData: {orderId: order.orderRef},
+                                    metadata: {
+                                        orderId: order._id,
+                                        orderRef: order.orderRef,
+                                    }
+                                })
+                            );
+                        }
+
+                        if (!existingPaymentNotification) {
+                            notificationPromises.push(
+                                NotificationService.createNotification({
+                                    userId: order.clientId,
+                                    type: 'payment.successful',
+                                    templateData: {
+                                        amount: verificationData.amount,
+                                        orderId: order.orderRef
+                                    },
+                                    metadata: {
+                                        orderId: order._id,
+                                        orderRef: order.orderRef,
+                                        paymentData: verificationData,
+                                        gateway: 'PayStack'
+                                    }
+                                })
+                            );
+                        }
+
+                        if (notificationPromises.length > 0) {
+                            await Promise.all(notificationPromises);
+                        }
+
+                        console.log('✅ Card payment successful via callback:', reference);
+                    }
+
+                    return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reference=${reference}`);
+
+                } else {
+                    // Payment failed
+                    console.log('Payment failed via callback:', verificationData.status);
+
+                    await Order.findOneAndUpdate(
+                        {
+                            _id: orderId,
+                            'payment.reference': reference
+                        },
+                        {
+                            $set: {
+                                'payment.status': PAYMENT_STATUS.FAILED,
+                                'payment.failureReason': verificationData.gateway_response || 'Payment failed',
+                                'payment.failedAt': new Date()
+                            }
+                        }
+                    );
+
+                    // Send failure notification
+                    const paymentNotification = await Notification.findOne({
+                        userId: order.clientId,
+                        category: 'PAYMENT',
+                        type: 'payment.failed',
+                        'metadata.orderId': order._id
+                    });
+
+                    if (!paymentNotification) {
+                        await NotificationService.createNotification({
+                            userId: order.clientId,
+                            type: 'payment.failed',
+                            templateData: {
+                                amount: order.pricing.totalAmount,
+                                orderId: order.orderRef
+                            },
+                            metadata: {
+                                orderId: order._id,
+                                orderRef: order.orderRef,
+                                totalAmount: order.pricing.totalAmount,
+                                status: 'failed',
+                                gateway: 'PayStack',
+                                reason: verificationData.gateway_response || 'Payment failed',
+                            }
+                        });
+                    }
+
+                    return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reason=${encodeURIComponent(verificationData.gateway_response || 'payment_failed')}`);
+                }
+
+            } catch (verificationError) {
+                console.log('Payment verification failed in callback:', verificationError);
+                return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reason=verification_failed`);
+            }
+
+        } catch (error) {
+            console.log('Payment callback error:', error);
+            return res.redirect(`${process.env.APP_DEEP_LINK}://client/orders/payment-status?orderId=${orderId}&reason=server_error`);
+        }
+    }
+
+    /**
      * Check payment status for a given order
      * - Used by frontend to poll for payment completion
      * @param req
@@ -1188,7 +1977,6 @@ class OrderController {
 
         const {userData} = preCheckResult;
         const clientId = userData._id;
-        // check both query params and body for flexibility
         const {reference, orderId} = {...req.query, ...req.body};
 
         if (!reference || !orderId) {
@@ -1203,6 +1991,7 @@ class OrderController {
 
         try {
             const {Order} = await getOrderModels();
+            const {ClientWallet, FinancialTransaction} = await getFinancialModels();
 
             // Find order with payment details
             const order = await Order.findOne({
@@ -1218,7 +2007,7 @@ class OrderController {
                 });
             }
 
-            // If already confirmed as paid, return immediately
+            // ✅ If already confirmed as paid, return immediately
             if (order.payment.status === PAYMENT_STATUS.PAID) {
                 return res.status(200).json({
                     status: 'paid',
@@ -1229,43 +2018,475 @@ class OrderController {
                 });
             }
 
+            // ✅ Detect payment type
+            const isHybridPayment = reference.includes('-HYBRID-') ||
+                order.payment.metadata?.paymentType === 'hybrid';
+
+            console.log('🔍 Checking payment status:', {
+                reference,
+                orderId,
+                isHybrid: isHybridPayment,
+                currentStatus: order.payment.status
+            });
+
             // Verify with PayStack for real-time status
             try {
                 console.log('Verifying payment with PayStack:', reference);
                 const verification = await verifyPayStackTransaction(reference);
-
                 const verificationData = verification.data;
 
                 if (verificationData.status === 'success') {
-                    // Verify amount matches (convert from kobo to naira)
                     const paidAmount = verificationData.amount / 100;
 
-                    if (Math.abs(paidAmount - order.payment.amount) > 0.01) {
-                        console.log('Amount verification failed:', {
-                            expected: order.payment.amount,
-                            received: paidAmount
+                    // ✅ Determine expected amount based on payment type
+                    let expectedAmount;
+                    if (isHybridPayment) {
+                        expectedAmount = order.payment.cardAmount || order.payment.metadata?.cardAmount;
+                        console.log('🔄 Hybrid payment verification:', {
+                            totalAmount: order.payment.amount,
+                            cardAmount: expectedAmount,
+                            walletAmount: order.payment.walletAmount || order.payment.metadata?.walletAmount,
+                            paidAmount
+                        });
+                    } else {
+                        expectedAmount = order.payment.amount;
+                        console.log('💳 Card-only payment verification:', {
+                            expectedAmount,
+                            paidAmount
+                        });
+                    }
+
+                    // Verify amount matches
+                    if (Math.abs(paidAmount - expectedAmount) > 0.01) {
+                        console.log('❌ Amount verification failed:', {
+                            expected: expectedAmount,
+                            received: paidAmount,
+                            isHybrid: isHybridPayment
                         });
 
                         return res.status(400).json({
                             error: "Payment amount mismatch",
-                            details: "Verified amount does not match order total"
+                            details: "Verified amount does not match expected amount"
                         });
                     }
 
-                    // Update order status atomically
-                    // new: update metadata,
+                    console.log('✅ Amount verification passed');
+
+                    // ============================================
+                    // HYBRID PAYMENT FINALIZATION
+                    // ============================================
+                    if (isHybridPayment) {
+                        const walletAmount = order.payment.walletAmount || order.payment.metadata?.walletAmount;
+                        const cardAmount = paidAmount;
+
+                        console.log('🔄 Finalizing hybrid payment:', {
+                            walletAmount,
+                            cardAmount,
+                            total: order.payment.amount
+                        });
+
+                        // Get wallet and verify balance
+                        const wallet = await ClientWallet.findOne({clientId: order.clientId});
+                        if (!wallet || wallet.balance < walletAmount) {
+                            console.error('❌ Insufficient wallet balance:', {
+                                required: walletAmount,
+                                available: wallet?.balance
+                            });
+
+                            await Order.findByIdAndUpdate(order._id, {
+                                'payment.status': PAYMENT_STATUS.FAILED,
+                                'payment.failureReason': 'Insufficient wallet balance at verification',
+                                'payment.failedAt': new Date()
+                            });
+
+                            return res.status(400).json({
+                                error: "Insufficient wallet balance",
+                                details: "Wallet balance insufficient to complete hybrid payment"
+                            });
+                        }
+
+                        // Check if financial records already exist
+                        const existingPaymentTxn = order.pricing?.financialReferences?.paymentTransactionId;
+
+                        let cardTransaction, walletTransaction, savedTransactions;
+                        let financialBreakdown;
+
+                        if (!existingPaymentTxn) {
+                            // 🔥 Calculate financial breakdown
+                            const pricingBreakdown = order.pricing.pricingBreakdown;
+                            financialBreakdown = calculateOrderFinancials(
+                                pricingBreakdown,
+                                'hybrid',
+                                walletAmount,
+                                cardAmount
+                            );
+
+                            // Validate calculations
+                            const validation = validateFinancialIntegrity(order, financialBreakdown);
+                            if (!validation.valid) {
+                                console.error('❌ Financial validation failed:', validation.errors);
+                                return res.status(500).json({
+                                    error: "Financial calculation error",
+                                    details: validation.errors
+                                });
+                            }
+
+                            // 1. Create card payment transaction
+                            cardTransaction = new FinancialTransaction({
+                                transactionType: 'client_payment',
+                                orderId: order._id,
+                                clientId: order.clientId,
+                                amount: {
+                                    gross: cardAmount,
+                                    fees: (verificationData.fees || 0) / 100,
+                                    net: cardAmount - ((verificationData.fees || 0) / 100),
+                                    currency: 'NGN'
+                                },
+                                status: 'completed',
+                                gateway: {
+                                    provider: 'paystack',
+                                    reference: reference,
+                                    channel: verificationData.channel,
+                                    metadata: verificationData
+                                },
+                                metadata: {
+                                    description: `Card payment for order ${order.orderRef} (Hybrid)`,
+                                    paymentType: 'hybrid',
+                                    manualVerification: true,
+                                    pricingCalculationId: pricingBreakdown.calculationId
+                                },
+                                processedBy: 'system',
+                                processedAt: new Date()
+                            });
+
+                            await cardTransaction.save();
+
+                            // 2. Deduct from wallet
+                            walletTransaction = new FinancialTransaction({
+                                transactionType: 'wallet_deduction',
+                                orderId: order._id,
+                                clientId: order.clientId,
+                                amount: {
+                                    gross: walletAmount,
+                                    fees: 0,
+                                    net: walletAmount,
+                                    currency: 'NGN'
+                                },
+                                status: 'completed',
+                                gateway: {
+                                    provider: 'wallet',
+                                    reference: `WALLET-${Date.now()}-${order._id}`,
+                                    channel: 'wallet'
+                                },
+                                wallet: {
+                                    used: true,
+                                    amount: walletAmount,
+                                    balanceBefore: wallet.balance,
+                                    balanceAfter: wallet.balance - walletAmount
+                                },
+                                metadata: {
+                                    description: `Wallet payment for order ${order.orderRef} (Hybrid)`,
+                                    paymentType: 'hybrid',
+                                    relatedTransactionId: cardTransaction._id,
+                                    manualVerification: true,
+                                    pricingCalculationId: pricingBreakdown.calculationId
+                                },
+                                processedBy: 'system',
+                                processedAt: new Date()
+                            });
+
+                            await walletTransaction.save();
+
+                            // 3. Update wallet balance
+                            wallet.balance -= walletAmount;
+                            wallet.lifetime.totalSpent += walletAmount;
+                            wallet.lifetime.transactionCount += 1;
+                            wallet.lifetime.lastActivityAt = new Date();
+
+                            wallet.recentTransactions.unshift({
+                                transactionId: walletTransaction._id,
+                                type: 'payment',
+                                amount: -walletAmount,
+                                balanceAfter: wallet.balance,
+                                description: `Hybrid payment for order ${order.orderRef}`
+                            });
+                            wallet.recentTransactions = wallet.recentTransactions.slice(0, 10);
+
+                            await wallet.save();
+
+                            // 4. Create all financial transactions
+                            const financialTransactions = createOrderFinancialTransactions(
+                                order,
+                                financialBreakdown,
+                                walletTransaction
+                            );
+
+                            savedTransactions = await Promise.all(
+                                financialTransactions.map(txn => new FinancialTransaction(txn).save())
+                            );
+
+                            console.log('✅ Financial records created via manual verification');
+                        } else {
+                            console.log('ℹ️ Financial records already exist, skipping creation');
+
+                            // Fetch existing transactions for response
+                            cardTransaction = await FinancialTransaction.findById(existingPaymentTxn);
+                            walletTransaction = await FinancialTransaction.findById(
+                                order.pricing.financialReferences.walletTransactionId
+                            );
+                            financialBreakdown = order.payment.financialBreakdown;
+                        }
+
+                        // 5. Update order atomically
+                        const updatedOrder = await Order.findOneAndUpdate(
+                            {
+                                _id: orderId,
+                                'payment.reference': reference,
+                                'payment.status': {$ne: PAYMENT_STATUS.PAID}
+                            },
+                            {
+                                $set: {
+                                    'payment.status': PAYMENT_STATUS.PAID,
+                                    'payment.paidAt': new Date(),
+                                    'payment.paystackData': verificationData,
+                                    'payment.clientPaymentTransactionId': cardTransaction._id,
+                                    'payment.financialBreakdown': financialBreakdown,
+                                    'payment.breakdown': {
+                                        total: order.payment.amount,
+                                        cardAmount: cardAmount,
+                                        walletAmount: walletAmount,
+                                        paystackFee: (verificationData.fees || 0) / 100,
+                                        isHybrid: true
+                                    },
+                                    'pricing.financialReferences': existingPaymentTxn ? undefined : {
+                                        paymentTransactionId: cardTransaction._id,
+                                        walletTransactionId: walletTransaction._id,
+                                        driverEarningTransactionId: savedTransactions[0]._id,
+                                        platformRevenueTransactionId: savedTransactions[1]._id,
+                                        platformBonusRevenueTransactionId: savedTransactions[2]?._id || null
+                                    },
+                                    'status': ORDER_STATUS.SUBMITTED,
+                                    'metadata.draftProgress.step': 4,
+                                    'metadata.draftProgress.fieldCompletion.payment': true,
+                                    'metadata.draftProgress.completedAt': new Date(),
+                                    'metadata.draftProgress.lastUpdated': new Date()
+                                },
+                                $addToSet: {
+                                    'metadata.draftProgress.completedSteps': 4
+                                },
+                                $push: {
+                                    orderInstantHistory: {
+                                        status: ORDER_STATUS.SUBMITTED,
+                                        timestamp: new Date(),
+                                        updatedBy: {
+                                            userId: clientId,
+                                            role: 'system'
+                                        },
+                                        notes: `Hybrid payment confirmed via manual verification. Wallet: ₦${walletAmount.toLocaleString()}, Card: ₦${cardAmount.toLocaleString()}`
+                                    },
+                                    orderTrackingHistory: {
+                                        $each: [
+                                            {
+                                                status: 'payment_completed',
+                                                timestamp: new Date(),
+                                                title: 'Payment Completed',
+                                                description: `Payment successful: Wallet (₦${walletAmount.toLocaleString()}) + Card (₦${cardAmount.toLocaleString()})`,
+                                                icon: "💳",
+                                                isCompleted: true,
+                                                isCurrent: false,
+                                            },
+                                            {
+                                                status: 'order_submitted',
+                                                timestamp: new Date(),
+                                                title: 'Order Submitted',
+                                                description: 'Your order has been submitted and is pending admin review.',
+                                                icon: "📤",
+                                                isCompleted: false,
+                                                isCurrent: true,
+                                            }
+                                        ]
+                                    }
+                                }
+                            },
+                            {new: true}
+                        );
+
+                        if (updatedOrder) {
+                            console.log('✅ Hybrid payment confirmed via manual verification:', reference);
+
+                            // Send notifications if not already sent
+                            const [existingOrderNotification, existingPaymentNotification] = await Promise.all([
+                                Notification.findOne({
+                                    userId: order.clientId,
+                                    category: 'ORDER',
+                                    type: 'order.created',
+                                    'metadata.orderId': order._id
+                                }).lean(),
+                                Notification.findOne({
+                                    userId: order.clientId,
+                                    category: 'PAYMENT',
+                                    type: 'payment.successful',
+                                    'metadata.orderId': order._id
+                                }).lean()
+                            ]);
+
+                            const notificationPromises = [];
+
+                            if (!existingOrderNotification) {
+                                notificationPromises.push(
+                                    NotificationService.createNotification({
+                                        userId: order.clientId,
+                                        type: 'order.created',
+                                        templateData: {orderId: order.orderRef},
+                                        metadata: {
+                                            orderId: order._id,
+                                            orderRef: order.orderRef,
+                                        }
+                                    })
+                                );
+                            }
+
+                            if (!existingPaymentNotification) {
+                                notificationPromises.push(
+                                    NotificationService.createNotification({
+                                        userId: order.clientId,
+                                        type: 'payment.successful',
+                                        templateData: {
+                                            amount: order.payment.amount,
+                                            orderId: order.orderRef,
+                                            paymentMethod: 'Wallet + Card',
+                                            walletAmount: walletAmount,
+                                            cardAmount: cardAmount
+                                        },
+                                        metadata: {
+                                            orderId: order._id,
+                                            orderRef: order.orderRef,
+                                            paymentData: verificationData,
+                                            gateway: 'PayStack',
+                                            isHybrid: true,
+                                            totalAmount: order.payment.amount,
+                                            cardAmount: cardAmount,
+                                            walletAmount: walletAmount
+                                        }
+                                    })
+                                );
+                            }
+
+                            if (notificationPromises.length > 0) {
+                                await Promise.all(notificationPromises);
+                            }
+
+                            return res.status(200).json({
+                                status: 'paid',
+                                message: 'Hybrid payment confirmed successfully',
+                                reference: reference,
+                                paidAt: updatedOrder.payment.paidAt,
+                                amount: updatedOrder.payment.amount,
+                                breakdown: {
+                                    wallet: walletAmount,
+                                    card: cardAmount,
+                                    total: order.payment.amount
+                                },
+                                orderId: updatedOrder._id
+                            });
+                        } else {
+                            return res.status(200).json({
+                                status: 'paid',
+                                message: 'Payment already confirmed',
+                                reference: reference
+                            });
+                        }
+                    }
+
+                    // ============================================
+                    // CARD-ONLY PAYMENT FINALIZATION
+                    // ============================================
+                    console.log('💳 Finalizing card-only payment');
+
+                    // Check if financial records already exist
+                    const existingPaymentTxn = order.pricing?.financialReferences?.paymentTransactionId;
+
+                    let cardTransaction, savedTransactions;
+                    let financialBreakdown;
+
+                    if (!existingPaymentTxn) {
+                        // Calculate financial breakdown
+                        const pricingBreakdown = order.pricing.pricingBreakdown;
+                        financialBreakdown = calculateOrderFinancials(
+                            pricingBreakdown,
+                            'paystack',
+                            0,
+                            paidAmount
+                        );
+
+                        // Create card payment transaction
+                        cardTransaction = new FinancialTransaction({
+                            transactionType: 'client_payment',
+                            orderId: order._id,
+                            clientId: order.clientId,
+                            amount: {
+                                gross: paidAmount,
+                                fees: (verificationData.fees || 0) / 100,
+                                net: paidAmount - ((verificationData.fees || 0) / 100),
+                                currency: 'NGN'
+                            },
+                            status: 'completed',
+                            gateway: {
+                                provider: 'paystack',
+                                reference: reference,
+                                channel: verificationData.channel,
+                                metadata: verificationData
+                            },
+                            metadata: {
+                                description: `Card payment for order ${order.orderRef}`,
+                                paymentType: 'paystack',
+                                manualVerification: true,
+                                pricingCalculationId: pricingBreakdown.calculationId
+                            },
+                            processedBy: 'system',
+                            processedAt: new Date()
+                        });
+
+                        await cardTransaction.save();
+
+                        // Create financial transactions
+                        const financialTransactions = createOrderFinancialTransactions(
+                            order,
+                            financialBreakdown,
+                            null
+                        );
+
+                        savedTransactions = await Promise.all(
+                            financialTransactions.map(txn => new FinancialTransaction(txn).save())
+                        );
+
+                        console.log('✅ Financial records created via manual verification');
+                    } else {
+                        console.log('ℹ️ Financial records already exist, skipping creation');
+                        cardTransaction = await FinancialTransaction.findById(existingPaymentTxn);
+                        financialBreakdown = order.payment.financialBreakdown;
+                    }
+
+                    // Update order atomically
                     const updatedOrder = await Order.findOneAndUpdate(
                         {
                             _id: orderId,
                             'payment.reference': reference,
-                            'payment.status': {$ne: PAYMENT_STATUS.PAID} // Prevent duplicate updates
+                            'payment.status': {$ne: PAYMENT_STATUS.PAID}
                         },
                         {
                             $set: {
                                 'payment.status': PAYMENT_STATUS.PAID,
                                 'payment.paidAt': new Date(),
                                 'payment.paystackData': verificationData,
-                                'status': ORDER_STATUS.PAID,
+                                'payment.clientPaymentTransactionId': cardTransaction._id,
+                                'payment.financialBreakdown': financialBreakdown,
+                                'pricing.financialReferences': existingPaymentTxn ? undefined : {
+                                    paymentTransactionId: cardTransaction._id,
+                                    driverEarningTransactionId: savedTransactions[0]._id,
+                                    platformRevenueTransactionId: savedTransactions[1]._id
+                                },
+                                'status': ORDER_STATUS.SUBMITTED,
                                 'metadata.draftProgress.step': 4,
                                 'metadata.draftProgress.fieldCompletion.payment': true,
                                 'metadata.draftProgress.completedAt': new Date(),
@@ -1276,97 +2497,98 @@ class OrderController {
                             },
                             $push: {
                                 orderInstantHistory: {
-                                    status: ORDER_STATUS.PAID,
+                                    status: ORDER_STATUS.SUBMITTED,
                                     timestamp: new Date(),
                                     updatedBy: {
                                         userId: clientId,
                                         role: 'system'
                                     },
-                                    notes: `Payment confirmed via PayStack. Reference: ${reference}, Amount: ₦${paidAmount}`
+                                    notes: `Payment confirmed via manual verification. Amount: ₦${paidAmount.toLocaleString()}`
                                 },
                                 orderTrackingHistory: {
                                     $each: [
                                         {
-                                            status: 'order_submitted',
-                                            timestamp: new Date(),
-                                            title: 'Order Submitted',
-                                            description: 'Your order has been submitted and is pending processing.',
-                                            icon: "📤",
-                                            isCompleted: false,
-                                            isCurrent: true,
-                                        },
-                                        {
                                             status: 'payment_completed',
                                             timestamp: new Date(),
                                             title: 'Payment Completed',
-                                            description: 'Your payment was successful via Paystack. Order is now submitted for processing.',
+                                            description: 'Your payment was successful via Paystack.',
                                             icon: "✅",
                                             isCompleted: true,
                                             isCurrent: false,
+                                        },
+                                        {
+                                            status: 'order_submitted',
+                                            timestamp: new Date(),
+                                            title: 'Order Submitted',
+                                            description: 'Your order has been submitted and is pending admin review.',
+                                            icon: "📤",
+                                            isCompleted: false,
+                                            isCurrent: true,
                                         }
                                     ]
                                 }
                             }
                         },
-                        {
-                            new: true,
-                        }
+                        {new: true}
                     );
 
                     if (updatedOrder) {
-                        console.log('✅ Payment confirmed and order updated:', reference);
-                        // Send notification if not already sent
+                        console.log('✅ Card payment confirmed via manual verification:', reference);
+
+                        // Send notifications
                         const [existingOrderNotification, existingPaymentNotification] = await Promise.all([
                             Notification.findOne({
                                 userId: order.clientId,
                                 category: 'ORDER',
                                 type: 'order.created',
-                                'metadata.orderId': order._id,
-                                'metadata.orderRef': order.orderRef
+                                'metadata.orderId': order._id
                             }).lean(),
-
                             Notification.findOne({
                                 userId: order.clientId,
                                 category: 'PAYMENT',
                                 type: 'payment.successful',
-                                'metadata.orderId': order._id,
-                                'metadata.gateway': 'PayStack'
+                                'metadata.orderId': order._id
                             }).lean()
                         ]);
 
-                        // Create notifications only if they don't exist
+                        const notificationPromises = [];
+
                         if (!existingOrderNotification) {
-                            await NotificationService.createNotification({
-                                userId: order.clientId,
-                                type: 'order.created',
-                                templateData: {
-                                    orderId: order.orderRef
-                                },
-                                metadata: {
-                                    orderId: order._id,
-                                    orderRef: order.orderRef,
-                                }
-                            });
+                            notificationPromises.push(
+                                NotificationService.createNotification({
+                                    userId: order.clientId,
+                                    type: 'order.created',
+                                    templateData: {orderId: order.orderRef},
+                                    metadata: {
+                                        orderId: order._id,
+                                        orderRef: order.orderRef,
+                                    }
+                                })
+                            );
                         }
 
                         if (!existingPaymentNotification) {
-                            await NotificationService.createNotification({
-                                userId: order.clientId,
-                                type: 'payment.successful',
-                                templateData: {
-                                    amount: verificationData.amount,
-                                    orderId: order.orderRef
-                                },
-                                metadata: {
-                                    orderId: order._id,
-                                    orderRef: order.orderRef,
-                                    paymentData: verificationData,
-                                    gateway: 'PayStack'
-                                }
-                            });
+                            notificationPromises.push(
+                                NotificationService.createNotification({
+                                    userId: order.clientId,
+                                    type: 'payment.successful',
+                                    templateData: {
+                                        amount: verificationData.amount,
+                                        orderId: order.orderRef
+                                    },
+                                    metadata: {
+                                        orderId: order._id,
+                                        orderRef: order.orderRef,
+                                        paymentData: verificationData,
+                                        gateway: 'PayStack'
+                                    }
+                                })
+                            );
                         }
 
-                        console.log('✅ Order created notification sent');
+                        if (notificationPromises.length > 0) {
+                            await Promise.all(notificationPromises);
+                        }
 
                         return res.status(200).json({
                             status: 'paid',
@@ -1377,7 +2599,6 @@ class OrderController {
                             orderId: updatedOrder._id
                         });
                     } else {
-                        // Order was already updated by another process
                         return res.status(200).json({
                             status: 'paid',
                             message: 'Payment already confirmed',
@@ -1408,7 +2629,6 @@ class OrderController {
                     });
 
                 } else {
-                    // Payment still pending/processing
                     return res.status(200).json({
                         status: 'processing',
                         message: 'Payment is still being processed',
@@ -1418,8 +2638,6 @@ class OrderController {
 
             } catch (verificationError) {
                 console.log('PayStack verification failed:', verificationError);
-
-                // Return current order status instead of failing
                 return res.status(200).json({
                     status: order.payment.status,
                     message: 'Unable to verify with payment provider, returning cached status',
@@ -1537,7 +2755,7 @@ class OrderController {
      * Handle successful charge webhook
      */
     static
-    async handleSuccessfulCharge(data) {
+    async oldHandleSuccessfulCharge(data) {
         const {reference, amount, customer, metadata} = data;
 
         try {
@@ -1653,6 +2871,428 @@ class OrderController {
 
         } catch (error) {
             console.log('Error handling successful charge:', error);
+        }
+    }
+
+    static async handleSuccessfulCharge(data) {
+        const {reference, amount, customer, metadata} = data;
+
+        try {
+            const {Order} = await getOrderModels();
+            const {ClientWallet, FinancialTransaction} = await getFinancialModels();
+
+            const order = await Order.findOne({
+                'payment.reference': reference
+            });
+
+            if (!order) {
+                console.log('Order not found for webhook:', reference);
+                return {success: false, message: 'Order not found'};
+            }
+
+            // Prevent duplicate processing
+            if (order.payment.status === 'paid') {
+                console.log('Order already marked as paid:', reference);
+                return {success: true, message: 'Already processed'};
+            }
+
+            const isHybridPayment = order.payment.metadata?.paymentType === 'hybrid';
+            const paidAmount = amount / 100; // Convert from kobo
+
+            // ============================================
+            // HYBRID PAYMENT PROCESSING
+            // ============================================
+            if (isHybridPayment) {
+                const walletAmount = order.payment.metadata.walletAmount;
+                const cardAmount = order.payment.metadata.cardAmount;
+                const walletBalanceBefore = order.payment.metadata.walletBalanceBefore;
+
+                console.log('🔄 Processing hybrid payment:', {
+                    reference,
+                    walletAmount,
+                    cardAmount,
+                    paidAmount
+                });
+
+                // Verify card amount matches
+                if (Math.abs(paidAmount - cardAmount) > 0.01) {
+                    console.error('❌ Card amount mismatch:', {
+                        expected: cardAmount,
+                        received: paidAmount,
+                        reference
+                    });
+                    return {success: false, message: 'Card amount mismatch'};
+                }
+
+                // Get wallet and verify balance
+                const wallet = await ClientWallet.findOne({clientId: order.clientId});
+                if (!wallet || wallet.balance < walletAmount) {
+                    console.error('❌ Insufficient wallet balance:', {
+                        required: walletAmount,
+                        available: wallet?.balance,
+                        reference
+                    });
+
+                    await Order.findByIdAndUpdate(order._id, {
+                        'payment.status': 'failed',
+                        'payment.failureReason': 'Insufficient wallet balance at completion',
+                        'payment.failedAt': new Date()
+                    });
+
+                    return {success: false, message: 'Insufficient wallet balance'};
+                }
+
+                // 🔥 Calculate complete financial breakdown
+                const pricingBreakdown = order.pricing.pricingBreakdown;
+                const financialBreakdown = calculateOrderFinancials(
+                    pricingBreakdown,
+                    'hybrid',
+                    walletAmount,
+                    paidAmount
+                );
+
+                // Validate calculations
+                const validation = validateFinancialIntegrity(order, financialBreakdown);
+                if (!validation.valid) {
+                    console.error('❌ Financial validation failed:', validation.errors);
+                    return {success: false, message: 'Financial calculation error'};
+                }
+
+                // 1. Create card payment transaction
+                const cardTransaction = new FinancialTransaction({
+                    transactionType: 'client_payment',
+                    orderId: order._id,
+                    clientId: order.clientId,
+                    amount: {
+                        gross: paidAmount,
+                        fees: (data.fees || 0) / 100,
+                        net: paidAmount - ((data.fees || 0) / 100),
+                        currency: 'NGN'
+                    },
+                    status: 'completed',
+                    gateway: {
+                        provider: 'paystack',
+                        reference: reference,
+                        channel: data.channel,
+                        metadata: data
+                    },
+                    metadata: {
+                        description: `Card payment for order ${order.orderRef} (Hybrid)`,
+                        paymentType: 'hybrid',
+                        webhook: true,
+                        pricingCalculationId: pricingBreakdown.calculationId
+                    },
+                    processedBy: 'system',
+                    processedAt: new Date()
+                });
+
+                await cardTransaction.save();
+
+                // 2. Deduct from wallet
+                const walletTransaction = new FinancialTransaction({
+                    transactionType: 'wallet_deduction',
+                    orderId: order._id,
+                    clientId: order.clientId,
+                    amount: {
+                        gross: walletAmount,
+                        fees: 0,
+                        net: walletAmount,
+                        currency: 'NGN'
+                    },
+                    status: 'completed',
+                    gateway: {
+                        provider: 'wallet',
+                        reference: `WALLET-${Date.now()}-${order._id}`,
+                        channel: 'wallet'
+                    },
+                    wallet: {
+                        used: true,
+                        amount: walletAmount,
+                        balanceBefore: wallet.balance,
+                        balanceAfter: wallet.balance - walletAmount
+                    },
+                    metadata: {
+                        description: `Wallet payment for order ${order.orderRef} (Hybrid)`,
+                        paymentType: 'hybrid',
+                        relatedTransactionId: cardTransaction._id,
+                        pricingCalculationId: pricingBreakdown.calculationId
+                    },
+                    processedBy: 'system',
+                    processedAt: new Date()
+                });
+
+                await walletTransaction.save();
+
+                // 3. Update wallet balance
+                wallet.balance -= walletAmount;
+                wallet.lifetime.totalSpent += walletAmount;
+                wallet.lifetime.transactionCount += 1;
+                wallet.lifetime.lastActivityAt = new Date();
+
+                wallet.recentTransactions.unshift({
+                    transactionId: walletTransaction._id,
+                    type: 'payment',
+                    amount: -walletAmount,
+                    balanceAfter: wallet.balance,
+                    description: `Hybrid payment for order ${order.orderRef}`
+                });
+                wallet.recentTransactions = wallet.recentTransactions.slice(0, 10);
+
+                await wallet.save();
+
+                // 🔥 4. Create all financial transactions (driver, platform base, platform bonus)
+                const financialTransactions = createOrderFinancialTransactions(
+                    order,
+                    financialBreakdown,
+                    walletTransaction
+                );
+
+                // Save all transactions
+                const savedTransactions = await Promise.all(
+                    financialTransactions.map(txn => new FinancialTransaction(txn).save())
+                );
+
+                // 5. Update order
+                await Order.findOneAndUpdate(
+                    {
+                        _id: order._id,
+                        'payment.reference': reference,
+                        'payment.status': {$ne: 'paid'}
+                    },
+                    {
+                        $set: {
+                            'payment.status': 'paid',
+                            'payment.paidAt': new Date(),
+                            'payment.webhookData': data,
+                            'payment.clientPaymentTransactionId': cardTransaction._id,
+
+                            // 🔥 Complete financial breakdown
+                            'payment.financialBreakdown': financialBreakdown,
+
+                            'payment.metadata.pricingCalculationId': pricingBreakdown.calculationId,
+                            'payment.metadata.pricingEngineVersion': pricingBreakdown.pricingEngineVersion,
+
+                            'pricing.financialReferences': {
+                                paymentTransactionId: cardTransaction._id,
+                                walletTransactionId: walletTransaction._id,
+                                driverEarningTransactionId: savedTransactions[0]._id,
+                                platformRevenueTransactionId: savedTransactions[1]._id,
+                                platformBonusRevenueTransactionId: savedTransactions[2]?._id || null
+                            },
+
+                            'status': 'admin_review',
+                            'metadata.draftProgress.step': 4,
+                            'metadata.draftProgress.fieldCompletion.payment': true,
+                            'metadata.draftProgress.completedAt': new Date(),
+                            'metadata.draftProgress.lastUpdated': new Date(),
+                        },
+                        $addToSet: {
+                            'metadata.draftProgress.completedSteps': 4
+                        },
+                        $push: {
+                            orderInstantHistory: {
+                                status: 'admin_review',
+                                timestamp: new Date(),
+                                updatedBy: {
+                                    userId: order.clientId,
+                                    role: 'system'
+                                },
+                                notes: `Hybrid payment confirmed. Wallet: ₦${walletAmount}, Card: ₦${paidAmount}. Bonus revenue: ₦${financialBreakdown.platformBonusRevenue}`
+                            },
+                            orderTrackingHistory: {
+                                $each: [
+                                    {
+                                        status: 'payment_completed',
+                                        timestamp: new Date(),
+                                        title: 'Payment Completed',
+                                        description: `Payment successful: Wallet (₦${walletAmount.toLocaleString()}) + Card (₦${paidAmount.toLocaleString()})`,
+                                        icon: "💳",
+                                        isCompleted: true,
+                                        isCurrent: false,
+                                        updatedBy: {
+                                            role: 'system',
+                                            name: 'AAngLogistics System'
+                                        }
+                                    },
+                                    {
+                                        status: 'order_submitted',
+                                        timestamp: new Date(),
+                                        title: 'Order Submitted',
+                                        description: 'Your order has been submitted and is pending admin review.',
+                                        icon: "📤",
+                                        isCompleted: false,
+                                        isCurrent: true,
+                                        updatedBy: {
+                                            role: 'system',
+                                            name: 'AAngLogistics System'
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                );
+
+                console.log('✅ Hybrid payment completed:', {
+                    reference,
+                    driverShare: financialBreakdown.driverShare,
+                    platformBase: financialBreakdown.platformBaseShare,
+                    platformBonus: financialBreakdown.platformBonusRevenue,
+                    platformTotal: financialBreakdown.platformTotalRevenue
+                });
+
+                return {success: true, message: 'Hybrid payment processed'};
+            }
+
+            // ============================================
+            // REGULAR CARD-ONLY PAYMENT
+            // ============================================
+
+            // Verify amount
+            if (Math.abs(paidAmount - order.payment.amount) > 0.01) {
+                console.log('Amount mismatch:', {
+                    expected: order.payment.amount,
+                    received: paidAmount,
+                    reference
+                });
+                return {success: false, message: 'Amount mismatch'};
+            }
+
+            // 🔥 Calculate financial breakdown for card-only payment
+            const pricingBreakdown = order.pricing.pricingBreakdown;
+            const financialBreakdown = calculateOrderFinancials(
+                pricingBreakdown,
+                'paystack',
+                0,
+                paidAmount
+            );
+
+            // Create card payment transaction
+            const cardTransaction = new FinancialTransaction({
+                transactionType: 'client_payment',
+                orderId: order._id,
+                clientId: order.clientId,
+                amount: {
+                    gross: paidAmount,
+                    fees: (data.fees || 0) / 100,
+                    net: paidAmount - ((data.fees || 0) / 100),
+                    currency: 'NGN'
+                },
+                status: 'completed',
+                gateway: {
+                    provider: 'paystack',
+                    reference: reference,
+                    channel: data.channel,
+                    metadata: data
+                },
+                metadata: {
+                    description: `Card payment for order ${order.orderRef}`,
+                    paymentType: 'paystack',
+                    webhook: true,
+                    pricingCalculationId: pricingBreakdown.calculationId
+                },
+                processedBy: 'system',
+                processedAt: new Date()
+            });
+
+            await cardTransaction.save();
+
+            // Create financial transactions
+            const financialTransactions = createOrderFinancialTransactions(
+                order,
+                financialBreakdown,
+                null
+            );
+
+            const savedTransactions = await Promise.all(
+                financialTransactions.map(txn => new FinancialTransaction(txn).save())
+            );
+
+            // Update order
+            await Order.findOneAndUpdate(
+                {
+                    _id: order._id,
+                    'payment.reference': reference,
+                    'payment.status': {$ne: 'paid'}
+                },
+                {
+                    $set: {
+                        'payment.status': 'paid',
+                        'payment.paidAt': new Date(),
+                        'payment.webhookData': data,
+                        'payment.clientPaymentTransactionId': cardTransaction._id,
+                        'payment.financialBreakdown': financialBreakdown,
+                        'payment.metadata.pricingCalculationId': pricingBreakdown.calculationId,
+                        'payment.metadata.pricingEngineVersion': pricingBreakdown.pricingEngineVersion,
+                        'pricing.financialReferences': {
+                            paymentTransactionId: cardTransaction._id,
+                            driverEarningTransactionId: savedTransactions[0]._id,
+                            platformRevenueTransactionId: savedTransactions[1]._id
+                        },
+                        'status': 'admin_review',
+                        'metadata.draftProgress.step': 4,
+                        'metadata.draftProgress.fieldCompletion.payment': true,
+                        'metadata.draftProgress.completedAt': new Date(),
+                        'metadata.draftProgress.lastUpdated': new Date(),
+                    },
+                    $addToSet: {
+                        'metadata.draftProgress.completedSteps': 4
+                    },
+                    $push: {
+                        orderInstantHistory: {
+                            status: 'admin_review',
+                            timestamp: new Date(),
+                            updatedBy: {
+                                userId: order.clientId,
+                                role: 'system'
+                            },
+                            notes: `Payment confirmed via PayStack. Reference: ${reference}`
+                        },
+                        orderTrackingHistory: {
+                            $each: [
+                                {
+                                    status: 'payment_completed',
+                                    timestamp: new Date(),
+                                    title: 'Payment Completed',
+                                    description: 'Your payment was successful via Paystack.',
+                                    icon: "✅",
+                                    isCompleted: true,
+                                    isCurrent: false,
+                                    updatedBy: {
+                                        role: 'system',
+                                        name: 'AAngLogistics System'
+                                    }
+                                },
+                                {
+                                    status: 'order_submitted',
+                                    timestamp: new Date(),
+                                    title: 'Order Submitted',
+                                    description: 'Your order has been submitted and is pending admin review.',
+                                    icon: "📤",
+                                    isCompleted: false,
+                                    isCurrent: true,
+                                    updatedBy: {
+                                        role: 'system',
+                                        name: 'AAngLogistics System'
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            );
+
+            console.log('✅ Card payment completed:', {
+                reference,
+                driverShare: financialBreakdown.driverShare,
+                platformRevenue: financialBreakdown.platformBaseShare
+            });
+
+            return {success: true, message: 'Payment processed'};
+
+        } catch (error) {
+            console.error('❌ Error handling successful charge:', error);
+            return {success: false, message: error.message};
         }
     }
 
@@ -1850,7 +3490,7 @@ class OrderController {
         const clientId = userData._id;
 
         // Get query parameters
-        const { month, year, limit = 50, skip = 0 } = req.query;
+        const {month, year, limit = 50, skip = 0} = req.query;
 
         try {
             const {Order} = await getOrderModels();
@@ -1859,7 +3499,7 @@ class OrderController {
             const completedStatuses = ['delivered', 'failed', 'cancelled', 'returned'];
             let query = {
                 clientId: new mongoose.Types.ObjectId(clientId),
-                status: { $in: completedStatuses }
+                status: {$in: completedStatuses}
             };
 
             // Add date filtering if month/year provided
@@ -1884,7 +3524,7 @@ class OrderController {
 
             // Get orders with pagination
             const orders = await Order.find(query)
-                .sort({ updatedAt: -1 })
+                .sort({updatedAt: -1})
                 .limit(parseInt(limit))
                 .skip(parseInt(skip))
                 .lean();
@@ -1897,19 +3537,19 @@ class OrderController {
                 {
                     $match: {
                         clientId: new mongoose.Types.ObjectId(clientId),
-                        status: { $in: completedStatuses }
+                        status: {$in: completedStatuses}
                     }
                 },
                 {
                     $group: {
                         _id: {
-                            year: { $year: "$updatedAt" },
-                            month: { $month: "$updatedAt" }
+                            year: {$year: "$updatedAt"},
+                            month: {$month: "$updatedAt"}
                         }
                     }
                 },
                 {
-                    $sort: { "_id.year": -1, "_id.month": -1 }
+                    $sort: {"_id.year": -1, "_id.month": -1}
                 }
             ]);
 
@@ -1952,7 +3592,7 @@ class OrderController {
 
         const {userData} = preCheckResult;
         const clientId = userData._id;
-        const { searchQuery } = req.query;
+        const {searchQuery} = req.query;
 
         if (!searchQuery || searchQuery.trim() === '') {
             return res.status(400).json({
@@ -1968,13 +3608,13 @@ class OrderController {
             // Search in orderRef and package description
             const orders = await Order.find({
                 clientId: new mongoose.Types.ObjectId(clientId),
-                status: { $in: completedStatuses },
+                status: {$in: completedStatuses},
                 $or: [
-                    { orderRef: { $regex: searchQuery, $options: 'i' } },
-                    { 'package.description': { $regex: searchQuery, $options: 'i' } }
+                    {orderRef: {$regex: searchQuery, $options: 'i'}},
+                    {'package.description': {$regex: searchQuery, $options: 'i'}}
                 ]
             })
-                .sort({ updatedAt: -1 })
+                .sort({updatedAt: -1})
                 .limit(50)
                 .lean();
 
@@ -1989,6 +3629,494 @@ class OrderController {
             console.log("Search order history error:", err);
             return res.status(500).json({
                 error: "Failed to search order history"
+            });
+        }
+    }
+
+    static async processWalletPayment(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const clientId = userData._id;
+        const {orderId, amount} = req.body;
+
+        if (!orderId || !amount) {
+            return res.status(400).json({error: "Missing required fields"});
+        }
+
+        try {
+            const {Order} = await getOrderModels();
+            const {ClientWallet, FinancialTransaction} = await getFinancialModels();
+
+            // 1. Validate order
+            const order = await Order.findOne({_id: orderId, clientId, status: 'draft'});
+            if (!order) {
+                return res.status(404).json({error: 'Order not found or already processed'});
+            }
+
+            // 2. Validate amount matches order
+            if (Math.abs(amount - order.pricing.totalAmount) > 0.01) {
+                return res.status(400).json({error: 'Payment data error'});
+            }
+
+            // 3. Validate wallet
+            const wallet = await ClientWallet.findOne({clientId});
+            if (!wallet || wallet.status !== 'active') {
+                return res.status(400).json({error: 'Wallet not found or inactive'});
+            }
+
+            if (wallet.balance < amount) {
+                return res.status(400).json({
+                    error: 'Insufficient wallet balance',
+                    available: wallet.balance,
+                    required: amount
+                });
+            }
+
+            // 🔥 4. Calculate complete financial breakdown using pricing engine data
+            const pricingBreakdown = order.pricing.pricingBreakdown;
+            const financialBreakdown = calculateOrderFinancials(
+                pricingBreakdown,
+                'wallet',
+                amount, // walletAmount
+                0       // cardAmount
+            );
+
+            // Validate calculations
+            const validation = validateFinancialIntegrity(order, financialBreakdown);
+            if (!validation.valid) {
+                console.error('❌ Financial validation failed:', validation.errors);
+                return res.status(500).json({
+                    error: 'Financial calculation error',
+                    details: validation.errors
+                });
+            }
+
+            // 5. Create wallet deduction transaction
+            const walletTransaction = new FinancialTransaction({
+                transactionType: 'wallet_deduction',
+                orderId,
+                clientId,
+                amount: {
+                    gross: amount,
+                    fees: 0,
+                    net: amount,
+                    currency: 'NGN'
+                },
+                status: 'completed',
+                gateway: {
+                    provider: 'wallet',
+                    reference: `WALLET-${Date.now()}-${orderId}`,
+                    channel: 'wallet'
+                },
+                wallet: {
+                    used: true,
+                    amount: amount,
+                    balanceBefore: wallet.balance,
+                    balanceAfter: wallet.balance - amount
+                },
+                metadata: {
+                    description: `Payment for order ${order.orderRef}`,
+                    channel: 'mobile',
+                    userAgent: req.get('User-Agent'),
+                    ipAddress: req.ip,
+                    pricingCalculationId: pricingBreakdown.calculationId
+                },
+                processedBy: 'client',
+                processedAt: new Date()
+            });
+
+            await walletTransaction.save();
+
+            // 6. Update wallet balance
+            wallet.balance -= amount;
+            wallet.lifetime.totalSpent += amount;
+            wallet.lifetime.transactionCount += 1;
+            wallet.lifetime.lastActivityAt = new Date();
+
+            wallet.recentTransactions.unshift({
+                transactionId: walletTransaction._id,
+                type: 'payment',
+                amount: -amount,
+                balanceAfter: wallet.balance,
+                description: `Payment for order ${order.orderRef}`
+            });
+            wallet.recentTransactions = wallet.recentTransactions.slice(0, 10);
+
+            await wallet.save();
+
+            // 🔥 7. Create all financial transactions (driver, platform base, platform bonus)
+            const financialTransactions = createOrderFinancialTransactions(
+                order,
+                financialBreakdown,
+                walletTransaction
+            );
+
+            // Save all transactions
+            const savedTransactions = await Promise.all(
+                financialTransactions.map(txn => new FinancialTransaction(txn).save())
+            );
+
+            // 8. Update order with complete payment info
+            order.status = 'admin_review';
+            order.payment = {
+                method: 'Wallet',
+                status: 'paid',
+                paidAt: new Date(),
+                transactionId: walletTransaction._id.toString(),
+                amount: amount,
+                currency: 'NGN',
+                reference: walletTransaction.gateway.reference,
+                clientPaymentTransactionId: walletTransaction._id,
+
+                // 🔥 Complete financial breakdown
+                financialBreakdown: financialBreakdown,
+
+                metadata: {
+                    paymentType: 'wallet',
+                    walletAmount: amount,
+                    cardAmount: 0,
+                    walletBalanceBefore: wallet.balance + amount,
+                    pricingCalculationId: pricingBreakdown.calculationId,
+                    pricingEngineVersion: pricingBreakdown.pricingEngineVersion
+                }
+            };
+
+            // Update pricing with financial references
+            order.pricing.financialReferences = {
+                paymentTransactionId: walletTransaction._id,
+                driverEarningTransactionId: savedTransactions[0]._id,
+                platformRevenueTransactionId: savedTransactions[1]._id,
+                platformBonusRevenueTransactionId: savedTransactions[2]?._id || null
+            };
+
+            // Update metadata
+            order.metadata.draftProgress.step = 4;
+            order.metadata.draftProgress.fieldCompletion.payment = true;
+            order.metadata.draftProgress.completedAt = new Date();
+            order.metadata.draftProgress.lastUpdated = new Date();
+            if (!order.metadata.draftProgress.completedSteps.includes(4)) {
+                order.metadata.draftProgress.completedSteps.push(4);
+            }
+
+            // Add to order history
+            order.orderInstantHistory.push({
+                status: 'admin_review',
+                timestamp: new Date(),
+                updatedBy: {
+                    userId: clientId,
+                    role: 'client'
+                },
+                notes: `Payment completed via wallet. Ref: ${walletTransaction.gateway.reference}. Bonus revenue: ₦${financialBreakdown.platformBonusRevenue}`
+            });
+
+            order.orderTrackingHistory.push(
+                {
+                    status: 'payment_completed',
+                    timestamp: new Date(),
+                    title: 'Payment Completed',
+                    description: `Payment of ₦${amount.toLocaleString()} received via wallet`,
+                    icon: '💰',
+                    isCompleted: true,
+                    isCurrent: false,
+                    updatedBy: {
+                        role: 'system',
+                        name: 'AAngLogistics System'
+                    }
+                },
+                {
+                    status: 'order_submitted',
+                    timestamp: new Date(),
+                    title: 'Order Submitted',
+                    description: 'Your order has been submitted and is pending admin review.',
+                    icon: '📤',
+                    isCompleted: false,
+                    isCurrent: true,
+                    updatedBy: {
+                        role: 'system',
+                        name: 'AAngLogistics System'
+                    }
+                }
+            );
+
+            await order.save();
+
+            console.log('✅ Wallet payment completed:', {
+                reference: walletTransaction.gateway.reference,
+                driverShare: financialBreakdown.driverShare,
+                platformBase: financialBreakdown.platformBaseShare,
+                platformBonus: financialBreakdown.platformBonusRevenue,
+                platformTotal: financialBreakdown.platformTotalRevenue
+            });
+
+            return res.status(200).json({
+                success: true,
+                message: 'Payment completed successfully',
+                order: order.toObject(),
+            });
+
+        } catch (error) {
+            console.error('❌ Wallet payment error:', error);
+            return res.status(500).json({
+                error: 'Payment processing failed',
+                details: error.message
+            });
+        }
+    }
+
+    static async processHybridPayment(req, res) {
+        const preCheckResult = await AuthController.apiPreCheck(req);
+
+        if (!preCheckResult.success) {
+            return res.status(preCheckResult.statusCode).json({
+                error: preCheckResult.error,
+                ...(preCheckResult.tokenExpired && {tokenExpired: true})
+            });
+        }
+
+        const {userData} = preCheckResult;
+        const clientId = userData._id;
+        const {
+            orderId,
+            orderRef,
+            totalAmount,
+            walletAmount,
+            cardAmount,
+            email,
+            attemptId
+        } = req.body;
+
+        // Validate inputs
+        if (!orderId || !orderRef || !totalAmount || !walletAmount || !cardAmount || !email) {
+            return res.status(400).json({error: "Missing required payment fields"});
+        }
+
+        // Validate amounts add up
+        if (Math.abs((walletAmount + cardAmount) - totalAmount) > 0.01) {
+            return res.status(400).json({
+                error: "Payment breakdown mismatch",
+                details: `Wallet (₦${walletAmount}) + Card (₦${cardAmount}) must equal Total (₦${totalAmount})`
+            });
+        }
+
+        try {
+            const {Order} = await getOrderModels();
+            const {ClientWallet} = await getFinancialModels();
+
+            // 1. Validate order
+            const order = await Order.findOne({_id: orderId, clientId}).select('+payment');
+
+            if (!order) {
+                return res.status(404).json({
+                    error: "Order not found",
+                    details: "Order does not exist or you don't have permission"
+                });
+            }
+
+            // Validate order status
+            if (order.status !== 'draft') {
+                return res.status(400).json({
+                    error: "Invalid order status",
+                    details: `Only draft orders can be paid for. Current: ${order.status}`
+                });
+            }
+
+            // Validate order amount
+            if (Math.abs(totalAmount - order.pricing.totalAmount) > 0.01) {
+                return res.status(400).json({
+                    error: "Payment amount mismatch",
+                    expected: order.pricing.totalAmount,
+                    received: totalAmount
+                });
+            }
+
+            // 2. Validate wallet has sufficient balance
+            const wallet = await ClientWallet.findOne({clientId});
+            if (!wallet || wallet.status !== 'active') {
+                return res.status(400).json({error: 'Wallet not found or inactive'});
+            }
+
+            if (wallet.balance < walletAmount) {
+                return res.status(400).json({
+                    error: 'Insufficient wallet balance',
+                    available: wallet.balance,
+                    required: walletAmount
+                });
+            }
+
+            // 3. Check for existing pending payment (cooldown)
+            if (order.payment &&
+                ['processing', 'pending'].includes(order.payment.status)) {
+
+                const timeSinceInit = Date.now() - new Date(order.payment.initiatedAt).getTime();
+                const COOLDOWN_PERIOD = 30 * 1000; // 30 seconds
+
+                if (timeSinceInit < COOLDOWN_PERIOD) {
+                    const timeToWait = Math.ceil((COOLDOWN_PERIOD - timeSinceInit) / 1000);
+                    return res.status(409).json({
+                        error: "Payment already in progress",
+                        details: "A payment is already being processed for this order",
+                        reference: order.payment.reference,
+                        authorizationUrl: order.payment.metadata?.checkoutUrl,
+                        timeToWait: timeToWait,
+                        retryAfter: new Date(Date.now() + (COOLDOWN_PERIOD - timeSinceInit)).toISOString()
+                    });
+                }
+            }
+
+            // 4. Generate payment reference and idempotency key
+            const idempotencyKey = generateIdempotencyKey(order._id, attemptId);
+            const paymentRef = `${order.orderRef}-HYBRID-${Date.now()}`;
+            const callbackUrl = `${process.env.API_BASE_URL}/order/payment-callback?orderId=${order._id}&reference=${paymentRef}`;
+
+            // 5. Initialize Paystack for card portion ONLY
+            const payStackPayload = {
+                email,
+                amount: Math.round(cardAmount * 100), // Convert to kobo
+                currency: 'NGN',
+                reference: paymentRef,
+                callback_url: callbackUrl,
+                metadata: {
+                    orderId: order._id.toString(),
+                    clientId: clientId.toString(),
+                    orderRef: order.orderRef,
+                    paymentType: 'hybrid',
+                    walletAmount: walletAmount,
+                    cardAmount: cardAmount,
+                    totalAmount: totalAmount,
+                    idempotencyKey,
+                    custom_fields: [
+                        {
+                            display_name: "Order Reference",
+                            variable_name: "order_reference",
+                            value: order.orderRef
+                        },
+                        {
+                            display_name: "Payment Type",
+                            variable_name: "payment_type",
+                            value: "Wallet + Card"
+                        }
+                    ]
+                }
+            };
+
+            console.log('Initializing hybrid payment:', {
+                reference: paymentRef,
+                cardAmount,
+                walletAmount,
+                totalAmount
+            });
+
+            const response = await payStackInit(payStackPayload);
+
+            if (!response || !response.status || !response.data) {
+                throw new Error('Invalid response from payment service');
+            }
+
+            const {authorization_url, access_code, reference: providerRef} = response.data;
+
+            // 6. Reserve wallet amount (don't deduct yet, wait for card success)
+            // We'll store this in order metadata for webhook processing
+            const paymentUpdate = {
+                reference: paymentRef,
+                method: 'Hybrid',
+                status: 'processing',
+                amount: totalAmount,
+                currency: 'NGN',
+                initiatedAt: new Date(),
+                metadata: {
+                    checkoutUrl: authorization_url,
+                    accessCode: access_code,
+                    providerReference: providerRef,
+                    idempotencyKey,
+                    paymentType: 'hybrid',
+                    walletAmount: walletAmount,
+                    cardAmount: cardAmount,
+                    walletBalanceBefore: wallet.balance, // Store for webhook
+                    userAgent: req.get('User-Agent'),
+                    ipAddress: req.ip || req.connection.remoteAddress
+                }
+            };
+
+            // 7. Update order atomically
+            const updatedOrder = await Order.findOneAndUpdate(
+                {
+                    _id: order._id,
+                    clientId,
+                    status: 'draft'
+                },
+                {
+                    $set: {
+                        payment: paymentUpdate,
+                        'metadata.lastPaymentAttempt': new Date()
+                    },
+                    $push: {
+                        orderInstantHistory: {
+                            status: 'payment_initiated',
+                            timestamp: new Date(),
+                            updatedBy: {
+                                userId: clientId,
+                                role: 'client'
+                            },
+                            notes: `Hybrid payment initiated. Wallet: ₦${walletAmount}, Card: ₦${cardAmount}. Ref: ${paymentRef}`
+                        }
+                    }
+                },
+                {
+                    new: true,
+                    runValidators: true
+                }
+            );
+
+            if (!updatedOrder) {
+                return res.status(409).json({
+                    error: "Order status changed",
+                    details: "Order was modified during payment initialization"
+                });
+            }
+
+            console.log('✅ Hybrid payment initialized:', paymentRef);
+
+            return res.status(201).json({
+                message: "Hybrid payment initiated successfully",
+                authorizationUrl: authorization_url,
+                accessCode: access_code,
+                reference: paymentRef,
+                paymentBreakdown: {
+                    total: totalAmount,
+                    wallet: walletAmount,
+                    card: cardAmount
+                },
+                expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString()
+            });
+
+        } catch (error) {
+            console.error("❌ Hybrid payment initialization error:", error);
+
+            if (error.message?.includes('timeout')) {
+                return res.status(504).json({
+                    error: "Request timeout",
+                    details: "Payment service is temporarily slow. Please try again."
+                });
+            }
+
+            if (error.message?.includes('temporarily unavailable')) {
+                return res.status(503).json({
+                    error: "Service unavailable",
+                    details: "Payment service is temporarily unavailable."
+                });
+            }
+
+            return res.status(500).json({
+                error: "Failed to initiate hybrid payment",
+                details: error.message
             });
         }
     }

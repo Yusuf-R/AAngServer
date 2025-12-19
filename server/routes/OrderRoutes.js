@@ -18,6 +18,7 @@ orderRouter.options('*', cors(corsOptions));
 orderRouter.post('/instantiate', orderController.instantObject);
 orderRouter.post('/create', orderController.createOrder);
 orderRouter.get('/all', orderController.getAllClientOrders);
+orderRouter.get('/draft/resume', orderController.resumeDraft);
 orderRouter.get('/history', orderController.getOrderHistory);
 orderRouter.get('/history/search', orderController.searchOrderHistory);
 orderRouter.delete('/delete', orderController.deleteOrder);
@@ -27,5 +28,7 @@ orderRouter.post('/init-pay', orderController.initiatePayment);
 orderRouter.get('/payment-callback', orderController.paystackPaymentCallback); // after payment[MUST], the browser triggers base on the callback_url as provided
 orderRouter.get('/payment-status', orderController.checkPaymentStatus); // To check payment status by the FE once browser has returned to the app
 orderRouter.post('/paystack-webhook', orderController.paystackWebhook); // payStack uses this to talk to BE base on whatever action the user did on the browser
+orderRouter.post('/payment/wallet-only', orderController.processWalletPayment);
+orderRouter.post('/payment/hybrid', orderController.processHybridPayment);
 
 module.exports = orderRouter;

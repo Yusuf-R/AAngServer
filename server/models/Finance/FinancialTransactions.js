@@ -25,6 +25,7 @@ const FinancialTransactionSchema = new Schema({
             'driver_earning',      // Driver earns from delivery
             'driver_payout',       // Driver withdraws money
             'platform_revenue',    // Platform's 30% share
+            'platform_bonus_revenue',  // Track saved PayStack fees
             'refund',              // Money back to client
             'fee_deduction'        // Paystack fees
         ],
@@ -53,7 +54,7 @@ const FinancialTransactionSchema = new Schema({
 
     // Payment Gateway Details
     gateway: {
-        provider: {type: String, enum: ['paystack', 'wallet', 'combined', 'opay'], default: 'paystack'},
+        provider: {type: String, enum: ['paystack', 'wallet', 'hybrid', 'opay'], default: 'paystack'},
         reference: String,
         authorizationCode: String,
         channel: String, // card, bank_transfer, etc.
@@ -73,6 +74,27 @@ const FinancialTransactionSchema = new Schema({
         driverShare: {type: Number, default: 0},      // 70%
         platformShare: {type: Number, default: 0},    // 30%
         calculated: {type: Boolean, default: false}
+    },
+
+    revenueBreakdown: {
+        // For platform_revenue transactions
+        baseRevenue: Number,              // 30% share
+        bonusRevenue: Number,             // Saved fees
+        totalRevenue: Number,             // Total
+
+        // Revenue source
+        revenueSource: {
+            type: String,
+            enum: ['delivery_split', 'paystack_fee_saved', 'combined']
+        },
+
+        // Link to original pricing
+        originalDeliveryTotal: Number,
+        expectedPaystackFee: Number,
+        actualPaystackFee: Number,
+
+        // Calculation notes
+        calculationNotes: String
     },
 
     // Payout Details (for driver withdrawals)

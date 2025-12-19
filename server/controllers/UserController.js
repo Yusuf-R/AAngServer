@@ -742,7 +742,7 @@ class UserController {
         }
 
         const {userData} = preCheckResult;
-        const {status = 'all', page = 1, limit = 20} = req.query;
+        const {status = 'all', page = 1, limit = 20, filter = 'all_wallet'} = req.query;
 
         try {
             const {FinancialTransaction} = await getFinancialModels();
@@ -750,8 +750,17 @@ class UserController {
             // Build query
             let query = {
                 clientId: userData._id,
-                transactionType: 'wallet_deposit'
             };
+
+            // Filter based on what the frontend wants
+            if (filter === 'all_wallet') {
+                query.transactionType = {$in: ['wallet_deposit', 'wallet_deduction']};
+            } else if (filter === 'wallet_deduction') {
+                query.transactionType = 'wallet_deduction';
+            } else {
+                query.transactionType = 'wallet_deposit';
+            }
+
 
             if (status !== 'all') {
                 query.status = status;
@@ -770,25 +779,48 @@ class UserController {
 
             // Calculate stats
             const statsAggregate = await FinancialTransaction.aggregate([
-                {$match: {clientId: userData._id, transactionType: 'wallet_deposit'}},
+                {
+                    $match: {
+                        clientId: userData._id,
+                        transactionType: {$in: ['wallet_deposit', 'wallet_deduction']}
+                        }
+                    },
                 {
                     $group: {
-                        _id: '$status',
+                        _id:  {
+                            transactionType: '$transactionType',
+                            status: '$status'
+                        },
                         count: {$sum: 1},
                         totalAmount: {$sum: '$amount.net'}
                     }
                 }
             ]);
 
+            const depositStats = statsAggregate.filter(s => s._id.transactionType === 'wallet_deposit');
             const stats = {
                 total: total,
-                completed: statsAggregate.find(s => s._id === 'completed')?.count || 0,
-                pending: statsAggregate.find(s => s._id === 'pending')?.count || 0,
-                failed: statsAggregate.find(s => s._id === 'failed')?.count || 0,
-                totalDeposited: statsAggregate
-                    .filter(s => s._id === 'completed')
-                    .reduce((sum, s) => sum + s.totalAmount, 0)
+                completed: depositStats.find(s => s._id.status === 'completed')?.count || 0,
+                pending: depositStats.find(s => s._id.status === 'pending')?.count || 0,
+                failed: depositStats.find(s => s._id.status === 'failed')?.count || 0,
+                totalDeposited: depositStats
+                    .filter(s => s._id.status === 'completed')
+                    .reduce((sum, s) => sum + s.totalAmount, 0),
+
+                // NEW: Add wallet deduction stats
+                walletDeductions: {
+                    totalDeductions: statsAggregate
+                        .filter(s => s._id.transactionType === 'wallet_deduction' && s._id.status === 'completed')
+                        .reduce((sum, s) => sum + s.totalAmount, 0),
+                    totalDeductionCount: statsAggregate
+                        .filter(s => s._id.transactionType === 'wallet_deduction')
+                        .reduce((sum, s) => sum + s.count, 0)
+                }
             };
+
+            console.log({
+                stats
+            })
 
             return res.status(200).json({
                 success: true,
@@ -1111,8 +1143,6 @@ class UserController {
      * Calculate accurate Paystack fees
      * (Same as frontend calculation for verification)
      */
-    // UserController.js - CORRECTED FEE CALCULATION
-
     static calculatePaystackFees(walletAmount) {
         const PRICING_CONFIG = {
             decimalFee: 0.015,      // 1.5%
@@ -2147,7 +2177,7 @@ class UserController {
             // Build transaction query
             const transactionQuery = {
                 clientId: new mongoose.Types.ObjectId(clientId),
-                transactionType: {$in: ['client_payment', 'wallet_deposit']},
+                transactionType: {$in: ['client_payment', 'wallet_deposit', 'wallet_deduction']},
                 status: 'completed'
             };
 
@@ -2187,6 +2217,11 @@ class UserController {
             const deposits = periodSummary.find(s => s._id === 'wallet_deposit') || {
                 totalAmount: 0, count: 0, avgAmount: 0, totalFees: 0
             };
+            const deductions = periodSummary.find(s => s._id === 'wallet_deduction') || {
+                totalAmount: 0, count: 0, avgAmount: 0, totalFees: 0
+            };
+
+
 
             // Calculate spending trends
             const spendingTrends = await UserController.calculateSpendingTrends(clientId, period);

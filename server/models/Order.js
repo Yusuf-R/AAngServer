@@ -128,107 +128,8 @@ const PricingSchema = new Schema({
     currency: {type: String, default: 'NGN'},
 
     pricingBreakdown: {
-        // Base calculations
-        baseCalculation: {
-            vehicleType: String,
-            distance: Number,
-            baseFare: Number,
-            distanceRate: Number,
-            distanceFare: Number,
-            totalBase: Number
-        },
-
-        // Weight calculation
-        weightCalculation: {
-            packageWeight: Number,
-            freeLimit: Number,
-            excessWeight: Number,
-            excessRate: Number,
-            surcharge: Number
-        },
-
-        // Priority calculation
-        priorityCalculation: {
-            level: String,
-            multiplier: Number,
-            adjustment: Number,
-            adjustedTotal: Number
-        },
-
-        // Surcharges breakdown
-        surchargesBreakdown: {
-            packageSurcharges: [{
-                type: String,
-                amount: Number,
-                reason: String
-            }],
-            locationSurcharges: [{
-                type: String,
-                amount: Number,
-                reason: String
-            }],
-            totalSurcharges: Number
-        },
-
-        // Insurance calculation
-        insuranceCalculation: {
-            isInsured: Boolean,
-            declaredValue: Number,
-            rate: Number,
-            premium: Number,
-            isHighValue: Boolean
-        },
-
-        // Discount calculation
-        discountCalculation: {
-            code: String,
-            type: String, // percentage, fixed
-            value: Number,
-            amount: Number,
-            reason: String
-        },
-
-        // Tax calculation
-        taxCalculation: {
-            taxableAmount: Number,
-            vatRate: Number,
-            vatAmount: Number
-        },
-
-        // Payment processing fees
-        paymentFees: {
-            customerAmount: Number, // What customer pays
-            processingFee: Number,  // Paystack's cut
-            netAmount: Number,      // What you receive
-            effectiveFlatFee: Number,
-            feeBreakdown: String
-        },
-
-        // Revenue distribution (CRITICAL for financial tracking)
-        revenueDistribution: {
-            deliveryTotal: Number,      // Net amount you receive
-            driverShare: Number,        // 70% of deliveryTotal
-            platformShare: Number,      // 30% of deliveryTotal
-            driverPercentage: { type: Number, default: 70 },
-            platformPercentage: { type: Number, default: 30 }
-        },
-
-        // Final summary
-        finalSummary: {
-            subtotal: Number,
-            totalDiscount: Number,
-            taxableAmount: Number,
-            totalTax: Number,
-            deliveryTotal: Number,
-            customerAmount: Number,
-            processingFees: Number,
-            netReceived: Number
-        },
-
-        // Metadata
-        calculatedAt: { type: Date, default: Date.now },
-        pricingEngineVersion: String,
-        calculationId: String // For audit trail
+        type: Schema.Types.Mixed,
+        default: {}
     },
 
     // NEW: Financial tracking references
@@ -429,7 +330,7 @@ const OrderSchema = new Schema({
     payment: {
         method: {
             type: String,
-            enum: ['Wallet', 'PayStack', 'BankTransfer'],
+            enum: ['Wallet', 'PayStack', 'Opay', 'Hybrid'],
             required: true
         },
         status: {
@@ -457,13 +358,53 @@ const OrderSchema = new Schema({
 
         // NEW: Financial breakdown for reference
         financialBreakdown: {
-            grossAmount: Number,
-            paystackFee: Number,
-            netAmount: Number,
-            driverShare: Number,      // 70% of net
-            platformShare: Number,    // 30% of net
+            customerAmount: Number,           // ₦5,178 (what they paid)
+
+            // Original pricing engine calculation
+            originalDeliveryTotal: Number,    // ₦5,000 (base delivery cost)
+            expectedPaystackFee: Number,      // ₦178 (if fully via PayStack)
+
+            // Actual payment breakdown
+            walletUsed: Number,               // ₦3,000 or ₦5,178 or ₦0
+            cardPaid: Number,                 // ₦2,178 or ₦0 or ₦5,178
+            actualPaystackFee: Number,        // ₦32.67 or ₦0 or ₦178
+
+            // Net received by platform
+            netReceived: Number,              // Total amount received
+
+            // Sacred 70/30 split (ALWAYS based on originalDeliveryTotal)
+            driverShare: Number,              // 70% of ₦5,000 = ₦3,500
+            platformBaseShare: Number,        // 30% of ₦5,000 = ₦1,500
+
+            // 🎁 BONUS: Extra revenue from wallet usage
+            platformBonusRevenue: Number,     // ₦145.33 (saved fees)
+            bonusCalculation: {
+                expectedFee: Number,          // ₦178
+                actualFee: Number,            // ₦32.67
+                saved: Number                 // ₦145.33
+            },
+
+            // Total platform earnings
+            platformTotalRevenue: Number,     // ₦1,500 + ₦145.33 = ₦1,645.33
+
             currency: String
-        }
+        },
+
+        metadata: {
+            paymentType: {
+                type: String,
+                enum: ['wallet', 'paystack', 'hybrid', 'opay'],
+                default: 'paystack'
+            },
+            walletAmount: Number,
+            cardAmount: Number,
+            walletBalanceBefore: Number,
+
+            // 🔥 NEW: Store pricing engine calculation ID
+            pricingCalculationId: String,     // Links to pricing breakdown
+            pricingEngineVersion: String      // For audit trail
+        },
+
     },
 
     revenueDistribution: {
@@ -619,7 +560,7 @@ const OrderSchema = new Schema({
         userAgent: String,
         referenceNumber: String, // External system reference
         notes: String,
-
+        walletBalance:{ type: Number, default: 0 },
         // Add draft progress tracking
         draftProgress: {
             step: {type: Number, default: 0}, // Current step (0-4)
